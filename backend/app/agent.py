@@ -8,7 +8,16 @@ from sqlalchemy.orm import Session
 
 from .model_providers import ModelResponseError, ReferralModel, ReferralModelInput
 from .models import AgentEvent, Referral, ReferralState, WorkflowRun
+from .provider_database import provider_session
 from .provider_gateway import ProviderGateway, ProviderGatewayProtocolError, configured_provider_gateway
+
+
+def _default_gateway() -> ProviderGateway:
+    from .config import settings
+
+    if settings.provider_service_url:
+        return configured_provider_gateway(None)
+    return configured_provider_gateway(provider_session())
 from .tools import CoverageListResult, DocumentListResult, ProviderListResult, ReferralToolResult, SlotListResult, invoke_tool
 from .workflow import transition
 from .faults import FaultInjector
@@ -47,7 +56,10 @@ class ReferralCoordinator:
         self.db = db
         self.model = model
         self.fault_injector = fault_injector or FaultInjector()
-        self.provider_gateway = provider_gateway or configured_provider_gateway(db)
+        # The coordinator never reads provider tables through its own session.
+        # A caller may inject a gateway; otherwise the configured one is used,
+        # which opens a provider session only when there is no service to call.
+        self.provider_gateway = provider_gateway or _default_gateway()
 
     @traced("careroute.workflow.process", {"careroute.component": "referral-coordinator"})
     async def process(self, referral_id: uuid.UUID, workflow_run_id: uuid.UUID | None = None) -> ProcessingResult:

@@ -5,10 +5,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .database import engine, get_db
-from .models import Provider
+from .pagination import InvalidCursor
+from .provider_database import get_provider_db, provider_engine
+from .provider_models import Provider
 from .schemas import SpecialtyName
-from .tools import ProviderListResult, ProviderSpecialtyListResult, SlotListResult, invoke_tool
+from .provider_contracts import AppointmentListResult, BookingRequest, BookingResult, ProviderListResult, ProviderPage, ProviderSpecialtyListResult, SlotDetail, SlotListResult, SlotPage
+from . import provider_queries
 from .telemetry import configure_telemetry
 from .metrics import configure_metrics
 
@@ -40,25 +42,22 @@ def find_providers(
     include_evaluation: bool = False,
     x_careroute_correlation_id: str | None = Header(default=None),
     x_careroute_internal_token: str | None = Header(default=None),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_provider_db),
 ):
     _correlate(response, x_careroute_correlation_id)
     if include_evaluation and not _trusted(x_careroute_internal_token):
         raise HTTPException(status_code=403, detail="Evaluation provider access is restricted")
-    result = invoke_tool("findProviders", db, {"specialty": specialty, "include_evaluation": include_evaluation})
-    assert isinstance(result, ProviderListResult)
-    return result
+    return provider_queries.find_providers(db, specialty, include_evaluation)
 
 
 @app.get("/internal/specialties", response_model=ProviderSpecialtyListResult)
 def list_specialties(
     response: Response,
     x_careroute_correlation_id: str | None = Header(default=None),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_provider_db),
 ):
     _correlate(response, x_careroute_correlation_id)
-    items = list(db.scalars(select(Provider.specialty).where(Provider.accepting_new_patients.is_(True), Provider.is_synthetic.is_(True), Provider.is_evaluation.is_(False)).distinct().order_by(Provider.specialty)))
-    return ProviderSpecialtyListResult(items=items)
+    return provider_queries.list_specialties(db)
 
 
 @app.get("/internal/providers/{provider_id}/slots", response_model=SlotListResult)
@@ -67,7 +66,7 @@ def get_available_slots(
     response: Response,
     x_careroute_correlation_id: str | None = Header(default=None),
     x_careroute_internal_token: str | None = Header(default=None),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_provider_db),
 ):
     _correlate(response, x_careroute_correlation_id)
     provider = db.get(Provider, provider_id)
@@ -75,10 +74,87 @@ def get_available_slots(
         raise HTTPException(status_code=404, detail="Synthetic provider not found")
     if provider.is_evaluation and not _trusted(x_careroute_internal_token):
         raise HTTPException(status_code=404, detail="Synthetic provider not found")
-    result = invoke_tool("getAvailableSlots", db, {"provider_id": provider_id})
-    assert isinstance(result, SlotListResult)
-    return result
+    return provider_queries.available_slots(db, provider_id)
 
 
-configure_telemetry(app, "careroute-provider-service", engine)
+@app.get("/internal/catalog/providers", response_model=ProviderPage)
+def catalog_providers(
+    response: Response,
+    specialty: str | None = None,
+    accepting_new_patients: bool = True,
+    limit: int | None = None,
+    cursor: str | None = None,
+    x_careroute_correlation_id: str | None = Header(default=None),
+    db: Session = Depends(get_provider_db),
+):
+    """Paged provider catalogue for the public API. Excludes evaluation fixtures."""
+    _correlate(response, x_careroute_correlation_id)
+    try:
+        return provider_queries.list_providers(db, specialty, accepting_new_patients, limit, cursor)
+    except InvalidCursor as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/internal/catalog/slots", response_model=SlotPage)
+def catalog_slots(
+    response: Response,
+    provider_id: uuid.UUID | None = None,
+    specialty: str | None = None,
+    limit: int | None = None,
+    cursor: str | None = None,
+    x_careroute_correlation_id: str | None = Header(default=None),
+    db: Session = Depends(get_provider_db),
+):
+    _correlate(response, x_careroute_correlation_id)
+    try:
+        return provider_queries.list_free_slots(db, provider_id, specialty, limit, cursor)
+    except InvalidCursor as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/internal/referrals/{referral_id}/appointments", response_model=AppointmentListResult)
+def referral_appointments(
+    referral_id: uuid.UUID,
+    response: Response,
+    x_careroute_correlation_id: str | None = Header(default=None),
+    db: Session = Depends(get_provider_db),
+):
+    _correlate(response, x_careroute_correlation_id)
+    return provider_queries.appointments_for_referral(db, referral_id)
+
+
+@app.get("/internal/slots/{slot_id}", response_model=SlotDetail)
+def describe_slot(
+    slot_id: uuid.UUID,
+    response: Response,
+    x_careroute_correlation_id: str | None = Header(default=None),
+    db: Session = Depends(get_provider_db),
+):
+    _correlate(response, x_careroute_correlation_id)
+    detail = provider_queries.describe_slot(db, slot_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Slot not found")
+    return detail
+
+
+@app.post("/internal/bookings", response_model=BookingResult)
+def book(
+    payload: BookingRequest,
+    response: Response,
+    x_careroute_correlation_id: str | None = Header(default=None),
+    x_careroute_internal_token: str | None = Header(default=None),
+    db: Session = Depends(get_provider_db),
+):
+    """Book a slot. Only trusted CareRoute services may call this.
+
+    Confirmation gating and workflow state stay with the referral domain; this
+    endpoint owns the slot, the appointment, and the exactly-once guarantee.
+    """
+    _correlate(response, x_careroute_correlation_id)
+    if not _trusted(x_careroute_internal_token):
+        raise HTTPException(status_code=403, detail="Booking is restricted to trusted services")
+    return provider_queries.book_slot(db, payload)
+
+
+configure_telemetry(app, "careroute-provider-service", provider_engine)
 configure_metrics("careroute-provider-service")

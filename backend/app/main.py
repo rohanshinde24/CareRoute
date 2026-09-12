@@ -8,9 +8,10 @@ from .agent import ProcessingResult, ReferralCoordinator
 from .config import settings
 from .database import engine, get_db
 from .fhir import patient_to_fhir
-from .models import Appointment, AppointmentSlot, Patient, Provider, ProviderSchedule, Referral, ReferralState, SlotStatus
+from .models import Patient, Referral, ReferralState
 from .model_providers import ModelResponseError, configured_model
-from .provider_gateway import ProviderGatewayTransientError
+from .provider_database import ProviderSessionLocal
+from .provider_gateway import ProviderGatewayError, ProviderGatewayTransientError, configured_provider_gateway
 from .models import AgentEvent, WorkflowRun
 from .commands import CommandConflict, cancel, confirm_selection, receive_document, select_slot
 from .durable import mount_inngest, send_event
@@ -87,39 +88,48 @@ def get_patient_fhir(patient_id: uuid.UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Patient not found")
     return patient_to_fhir(patient)
 
-@app.get("/api/providers", response_model=list[ProviderRead])
-def list_providers(specialty: str | None = None, accepting_new_patients: bool = True, db: Session = Depends(get_db)):
-    query = select(Provider).where(Provider.accepting_new_patients == accepting_new_patients, Provider.is_evaluation.is_(False))
-    if specialty:
-        query = query.where(Provider.specialty.ilike(f"%{specialty}%"))
-    return db.scalars(query.order_by(Provider.name)).all()
+def provider_gateway_dependency():
+    """Yield a gateway, opening a provider-database session only if there is no
+    provider service to call.
+
+    A configured deployment sets PROVIDER_SERVICE_URL, and then the referral API
+    holds no connection to the provider database at all - which is the point of
+    the split. The local path exists for single-process runs and tests.
+    """
+    if settings.provider_service_url:
+        yield configured_provider_gateway(None)
+        return
+    with ProviderSessionLocal() as provider_db:
+        yield configured_provider_gateway(provider_db)
+
+
+@app.get("/api/providers", response_model=CursorPage[ProviderRead])
+async def list_providers(
+    specialty: str | None = None,
+    accepting_new_patients: bool = True,
+    limit: int | None = Query(None, ge=1, le=200),
+    cursor: str | None = Query(None),
+    gateway = Depends(provider_gateway_dependency),
+):
+    try:
+        page = await gateway.catalog_providers(specialty, accepting_new_patients, limit, cursor, uuid.uuid4())
+    except ProviderGatewayError as exc:
+        raise HTTPException(status_code=503, detail="Provider service is temporarily unavailable") from exc
+    return CursorPage[ProviderRead](items=page.items, next_cursor=page.next_cursor)
 
 @app.get("/api/slots", response_model=CursorPage[SlotRead])
-def list_slots(
+async def list_slots(
     provider_id: uuid.UUID | None = None,
     specialty: str | None = Query(None, min_length=2),
     limit: int | None = Query(None, ge=1, le=200),
     cursor: str | None = Query(None),
-    db: Session = Depends(get_db),
+    gateway = Depends(provider_gateway_dependency),
 ):
-    query = select(AppointmentSlot).join(ProviderSchedule).join(Provider).where(AppointmentSlot.status == SlotStatus.FREE, Provider.is_evaluation.is_(False)).options(joinedload(AppointmentSlot.schedule).joinedload(ProviderSchedule.provider))
-    if provider_id:
-        query = query.where(Provider.id == provider_id)
-    if specialty:
-        query = query.where(Provider.specialty.ilike(f"%{specialty}%"))
-    size = clamp_limit(limit)
-    if cursor:
-        try:
-            start_at, slot_id = decode_cursor(cursor)
-        except InvalidCursor as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        # Soonest first, so the next page is strictly "later than" the cursor row.
-        query = query.where(tuple_(AppointmentSlot.start_at, AppointmentSlot.id) > (start_at, slot_id))
-    rows = db.scalars(query.order_by(AppointmentSlot.start_at, AppointmentSlot.id).limit(size + 1)).unique().all()
-    slots = list(rows[:size])
-    next_cursor = encode_cursor(slots[-1].start_at, slots[-1].id) if len(rows) > size else None
-    items = [{"id": slot.id, "schedule_id": slot.schedule_id, "start_at": slot.start_at, "end_at": slot.end_at, "status": slot.status, "provider": slot.schedule.provider} for slot in slots]
-    return CursorPage[SlotRead](items=items, next_cursor=next_cursor)
+    try:
+        page = await gateway.catalog_slots(provider_id, specialty, limit, cursor, uuid.uuid4())
+    except ProviderGatewayError as exc:
+        raise HTTPException(status_code=503, detail="Provider service is temporarily unavailable") from exc
+    return CursorPage[SlotRead](items=page.items, next_cursor=page.next_cursor)
 
 @app.post("/api/referrals/{referral_id}/process", response_model=ProcessingResult)
 async def process_referral(referral_id: uuid.UUID, db: Session = Depends(get_db)):
@@ -180,10 +190,10 @@ async def add_referral_document(referral_id: uuid.UUID, payload: DocumentCreate,
     return CommandRead(referral_id=referral.id, state=referral.state, duplicate=duplicate, event_id=payload.event_id)
 
 @app.post("/api/referrals/{referral_id}/slot-selection", response_model=CommandRead)
-async def choose_referral_slot(referral_id: uuid.UUID, payload: SlotSelection, db: Session = Depends(get_db)):
+async def choose_referral_slot(referral_id: uuid.UUID, payload: SlotSelection, db: Session = Depends(get_db), gateway = Depends(provider_gateway_dependency)):
     referral = _referral_or_404(db, referral_id)
     try:
-        duplicate = select_slot(db, referral, payload.event_id, payload.slot_id)
+        duplicate = await select_slot(db, referral, payload.event_id, payload.slot_id, gateway)
     except (CommandConflict, InvalidTransition) as exc:
         raise _command_error(exc) from exc
     await send_event("careroute/slot.selected", payload.event_id, {"referral_id": str(referral.id), "slot_id": str(payload.slot_id)})
@@ -210,9 +220,13 @@ async def cancel_referral(referral_id: uuid.UUID, payload: Cancellation, db: Ses
     return CommandRead(referral_id=referral.id, state=referral.state, duplicate=duplicate, event_id=payload.event_id)
 
 @app.get("/api/referrals/{referral_id}/appointments", response_model=list[AppointmentRead])
-def list_referral_appointments(referral_id: uuid.UUID, db: Session = Depends(get_db)):
+async def list_referral_appointments(referral_id: uuid.UUID, db: Session = Depends(get_db), gateway = Depends(provider_gateway_dependency)):
     _referral_or_404(db, referral_id)
-    return db.scalars(select(Appointment).where(Appointment.referral_id == referral_id).order_by(Appointment.created_at)).all()
+    try:
+        result = await gateway.appointments_for_referral(referral_id, referral_id)
+    except ProviderGatewayError as exc:
+        raise HTTPException(status_code=503, detail="Provider service is temporarily unavailable") from exc
+    return result.items
 
 @app.get("/api/workflows/{workflow_id}", response_model=WorkflowRead)
 def get_workflow(workflow_id: uuid.UUID, db: Session = Depends(get_db)):

@@ -1,5 +1,6 @@
 from typing import Any
-from .models import AppointmentSlot, Coverage, Patient, Provider
+from .models import Coverage, Patient
+from .provider_models import AppointmentSlot, Provider
 
 FHIR_SYSTEM = "https://careroute.example/synthetic"
 

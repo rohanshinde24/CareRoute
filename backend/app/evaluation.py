@@ -15,10 +15,13 @@ from .agent import ReferralCoordinator
 from .booking import BookingError, book_selected_slot
 from .commands import confirm_selection, receive_document, select_slot
 from .database import SessionLocal
+from .provider_gateway import configured_provider_gateway
 from .faults import FaultInjector, InjectedTransientFailure
 from .fhir import validate_patient_fhir
 from .model_providers import DeterministicReferralModel
-from .models import Appointment, AppointmentSlot, Coverage, EvaluationCase, EvaluationRun, Patient, PatientProcedure, ProcessedEvent, Provider, ProviderSchedule, Referral, ReferralDocument, ReferralState, SlotStatus
+from .models import Coverage, EvaluationCase, EvaluationRun, Patient, PatientProcedure, ProcessedEvent, Referral, ReferralDocument, ReferralState
+from .provider_database import provider_session
+from .provider_models import Appointment, AppointmentSlot, Provider, ProviderSchedule, SlotStatus
 from .schemas import ReferralCreate
 from .workflow import latest_workflow
 
@@ -71,28 +74,35 @@ def _records(db: Session, case_name: str, *, document: bool = True, coverage: bo
         db.add(Coverage(patient_id=patient.id, external_id=f"coverage-{case_name}-{suffix}", source="evaluation", payer_name="Synthetic Plan", member_id=f"member-{suffix}", status="active", is_synthetic=True))
     if procedure:
         db.add(PatientProcedure(patient_id=patient.id, procedure_type=procedure[0], occurred_at=datetime.now(timezone.utc) - timedelta(days=7), report_document_type=procedure[1], is_synthetic=True))
+    db.commit()
     created_slot = None
     if provider:
-        clinician = Provider(name=f"Synthetic {case_name} {suffix}", specialty=requested, location="Evaluation, CA", is_synthetic=True, is_evaluation=True)
-        db.add(clinician)
-        db.flush()
-        schedule = ProviderSchedule(provider_id=clinician.id, name="Evaluation schedule", timezone="UTC")
-        db.add(schedule)
-        db.flush()
-        if slot:
-            start = datetime.now(timezone.utc) + timedelta(days=2)
-            created_slot = AppointmentSlot(schedule_id=schedule.id, start_at=start, end_at=start + timedelta(minutes=30))
-            db.add(created_slot)
-        if extra_provider_location:
-            extra = Provider(name=f"Z Preferred {case_name} {suffix}", specialty=requested, location=extra_provider_location, is_synthetic=True, is_evaluation=True)
-            db.add(extra)
-            db.flush()
-            extra_schedule = ProviderSchedule(provider_id=extra.id, name="Preferred evaluation schedule", timezone="UTC")
-            db.add(extra_schedule)
-            db.flush()
-            extra_start = datetime.now(timezone.utc) + timedelta(days=3)
-            db.add(AppointmentSlot(schedule_id=extra_schedule.id, start_at=extra_start, end_at=extra_start + timedelta(minutes=30)))
-    db.commit()
+        # Provider fixtures belong to the provider database, seeded through its
+        # own session. is_evaluation isolation is enforced there as it is here.
+        with provider_session() as provider_db:
+            clinician = Provider(name=f"Synthetic {case_name} {suffix}", specialty=requested, location="Evaluation, CA", is_synthetic=True, is_evaluation=True)
+            provider_db.add(clinician)
+            provider_db.flush()
+            schedule = ProviderSchedule(provider_id=clinician.id, name="Evaluation schedule", timezone="UTC")
+            provider_db.add(schedule)
+            provider_db.flush()
+            if slot:
+                start = datetime.now(timezone.utc) + timedelta(days=2)
+                created_slot = AppointmentSlot(schedule_id=schedule.id, start_at=start, end_at=start + timedelta(minutes=30))
+                provider_db.add(created_slot)
+            if extra_provider_location:
+                extra = Provider(name=f"Z Preferred {case_name} {suffix}", specialty=requested, location=extra_provider_location, is_synthetic=True, is_evaluation=True)
+                provider_db.add(extra)
+                provider_db.flush()
+                extra_schedule = ProviderSchedule(provider_id=extra.id, name="Preferred evaluation schedule", timezone="UTC")
+                provider_db.add(extra_schedule)
+                provider_db.flush()
+                extra_start = datetime.now(timezone.utc) + timedelta(days=3)
+                provider_db.add(AppointmentSlot(schedule_id=extra_schedule.id, start_at=extra_start, end_at=extra_start + timedelta(minutes=30)))
+            provider_db.commit()
+            if created_slot is not None:
+                provider_db.refresh(created_slot)
+                provider_db.expunge(created_slot)
     return referral, created_slot
 
 
@@ -109,20 +119,35 @@ async def _routing(db: Session, name: str, scenario: str) -> dict[str, Any]:
     }[scenario]
     referral, _ = _records(db, name, **options)
     result = await ReferralCoordinator(db, DeterministicReferralModel()).process(referral.id)
-    first_provider = db.get(Provider, result.provider_ids[0]) if result.provider_ids else None
-    return {"state": result.state.value, "missing_documents": result.missing_documents, "first_provider_location": first_provider.location if first_provider else None}
+    first_provider = None
+    if result.provider_ids:
+        with provider_session() as provider_db:
+            record = provider_db.get(Provider, result.provider_ids[0])
+            first_provider = record.location if record else None
+    return {"state": result.state.value, "missing_documents": result.missing_documents, "first_provider_location": first_provider}
 
 
-def _booking_case(db: Session, name: str, *, confirm: bool = True) -> tuple[Referral, AppointmentSlot, str]:
+async def _booking_case(db: Session, name: str, *, confirm: bool = True) -> tuple[Referral, AppointmentSlot, str]:
     referral, slot = _records(db, name)
     referral.state = ReferralState.WAITING_FOR_SLOT_SELECTION
     db.commit()
     command_prefix = f"{name}-{uuid.uuid4()}"
     selection_event_id = f"{command_prefix}-selection"
-    select_slot(db, referral, selection_event_id, slot.id)
+    with provider_session() as provider_db:
+        await select_slot(db, referral, selection_event_id, slot.id, configured_provider_gateway(provider_db))
     if confirm:
         confirm_selection(db, referral, f"{command_prefix}-confirmation")
     return referral, slot, selection_event_id
+
+
+def _appointments(referral_id: uuid.UUID) -> list[Appointment]:
+    with provider_session() as provider_db:
+        return list(provider_db.query(Appointment).filter_by(referral_id=referral_id).all())
+
+
+async def _book(db: Session, referral_id: uuid.UUID, injector: FaultInjector | None = None):
+    with provider_session() as provider_db:
+        return await book_selected_slot(db, referral_id, configured_provider_gateway(provider_db), injector)
 
 
 async def execute_case(db: Session, case_name: str, scenario: str) -> dict[str, Any]:
@@ -152,8 +177,9 @@ async def execute_case(db: Session, case_name: str, scenario: str) -> dict[str, 
             return {"transient_failure": True, "recovered_state": recovered.state.value}
         return {"transient_failure": False, "recovered_state": None}
     if scenario == "duplicate_event":
-        referral, slot, selection_event_id = _booking_case(db, case_name, confirm=False)
-        duplicate = select_slot(db, referral, selection_event_id, slot.id)
+        referral, slot, selection_event_id = await _booking_case(db, case_name, confirm=False)
+        with provider_session() as provider_db:
+            duplicate = await select_slot(db, referral, selection_event_id, slot.id, configured_provider_gateway(provider_db))
         count = db.query(ProcessedEvent).filter_by(event_id=selection_event_id).count()
         return {"processed_events": count, "duplicate": duplicate}
     if scenario == "document_resume":
@@ -164,34 +190,35 @@ async def execute_case(db: Session, case_name: str, scenario: str) -> dict[str, 
         resumed = await ReferralCoordinator(db, DeterministicReferralModel()).process(referral.id, initial.workflow_run_id)
         return {"initial_state": initial.state.value, "final_state": resumed.state.value}
     if scenario == "stale_slot":
-        referral, slot, _ = _booking_case(db, case_name)
-        slot.status = SlotStatus.BUSY
-        db.commit()
+        referral, slot, _ = await _booking_case(db, case_name)
+        with provider_session() as provider_db:
+            provider_db.get(AppointmentSlot, slot.id).status = SlotStatus.BUSY
+            provider_db.commit()
         try:
-            book_selected_slot(db, referral.id)
+            await _book(db, referral.id)
         except BookingError:
             pass
-        return {"state": db.get(Referral, referral.id).state.value, "appointments": db.query(Appointment).filter_by(referral_id=referral.id).count()}
+        return {"state": db.get(Referral, referral.id).state.value, "appointments": len(_appointments(referral.id))}
     if scenario == "booking_response_loss":
-        referral, _, _ = _booking_case(db, case_name)
+        referral, _, _ = await _booking_case(db, case_name)
         try:
-            book_selected_slot(db, referral.id, FaultInjector({"booking_response_loss": 1}))
+            await _book(db, referral.id, FaultInjector({"booking_response_loss": 1}))
         except InjectedTransientFailure:
             pass
-        recovered = book_selected_slot(db, referral.id)
-        records = db.query(Appointment).filter_by(referral_id=referral.id).all()
-        return {"appointments": len(records), "same_appointment": records[0].id == recovered.id}
+        recovered = await _book(db, referral.id)
+        records = _appointments(referral.id)
+        return {"appointments": len(records), "same_appointment": records[0].id == recovered.appointment_id}
     if scenario == "repeated_booking":
-        referral, _, _ = _booking_case(db, case_name)
-        first = book_selected_slot(db, referral.id)
-        second = book_selected_slot(db, referral.id)
-        return {"appointments": db.query(Appointment).filter_by(referral_id=referral.id).count(), "same_appointment": first.id == second.id}
+        referral, _, _ = await _booking_case(db, case_name)
+        first = await _book(db, referral.id)
+        second = await _book(db, referral.id)
+        return {"appointments": len(_appointments(referral.id)), "same_appointment": first.appointment_id == second.appointment_id}
     if scenario == "booking_without_confirmation":
-        referral, _, _ = _booking_case(db, case_name, confirm=False)
+        referral, _, _ = await _booking_case(db, case_name, confirm=False)
         try:
-            book_selected_slot(db, referral.id)
+            await _book(db, referral.id)
         except BookingError:
-            return {"blocked": True, "appointments": db.query(Appointment).filter_by(referral_id=referral.id).count()}
+            return {"blocked": True, "appointments": len(_appointments(referral.id))}
         return {"blocked": False, "appointments": 1}
     raise ValueError(f"Unknown evaluation scenario: {scenario}")
 

@@ -1,6 +1,7 @@
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from app.models import AppointmentSlot, Coverage, Patient, Provider, ProviderSchedule, Referral, ReferralDocument, ReferralState
+from app.models import Coverage, Patient, Referral, ReferralDocument, ReferralState
+from app.provider_models import AppointmentSlot, Provider, ProviderSchedule
 
 def patient(db):
     record = Patient(external_id="test-1", source="synthea", given_name="Avery", family_name="Ng", birth_date=date(1991, 1, 2), gender="unknown", is_synthetic=True)
@@ -8,7 +9,7 @@ def patient(db):
     db.commit()
     return record
 
-def test_create_and_get_referral(client, db):
+def test_create_and_get_referral(client, db, provider_db):
     person = patient(db)
     response = client.post("/api/referrals", json={"patient_id": str(person.id), "requested_specialty": "Cardiology", "reason": "Synthetic specialist referral", "location_preference": "San Francisco", "is_synthetic": True})
     assert response.status_code == 201
@@ -18,62 +19,67 @@ def test_create_and_get_referral(client, db):
     assert detail.json()["state"] == "RECEIVED"
     assert detail.json()["location_preference"] == "San Francisco"
 
-def test_rejects_non_synthetic_referral(client, db):
+def test_rejects_non_synthetic_referral(client, db, provider_db):
     person = patient(db)
     response = client.post("/api/referrals", json={"patient_id": str(person.id), "requested_specialty": "Cardiology", "reason": "Not synthetic", "is_synthetic": False})
     assert response.status_code == 422
 
-def test_rejects_uuid_as_specialty(client, db):
+def test_rejects_uuid_as_specialty(client, db, provider_db):
     person = patient(db)
     response = client.post("/api/referrals", json={"patient_id": str(person.id), "requested_specialty": "fcc61c2e-6df2-4404-9808-996c6fd18c95", "reason": "Synthetic specialist referral", "is_synthetic": True})
     assert response.status_code == 422
     assert "not an identifier" in response.text
 
-def test_lists_free_slots_with_provider(client, db):
+def test_lists_free_slots_with_provider(client, db, provider_db):
     provider = Provider(name="Synthetic Provider", specialty="Cardiology", location="Test, CA", is_synthetic=True)
-    db.add(provider)
-    db.flush()
+    provider_db.add(provider)
+    provider_db.flush()
     schedule = ProviderSchedule(provider_id=provider.id, name="Clinic", timezone="UTC")
-    db.add(schedule)
-    db.flush()
+    provider_db.add(schedule)
+    provider_db.flush()
     start = datetime.now(timezone.utc) + timedelta(days=1)
-    db.add(AppointmentSlot(schedule_id=schedule.id, start_at=start, end_at=start + timedelta(minutes=30)))
+    provider_db.add(AppointmentSlot(schedule_id=schedule.id, start_at=start, end_at=start + timedelta(minutes=30)))
+    provider_db.commit()
     db.commit()
     response = client.get("/api/slots?specialty=cardio")
     assert response.status_code == 200
     assert response.json()["items"][0]["provider"]["name"] == "Synthetic Provider"
 
-def test_product_lists_hide_evaluation_fixtures(client, db):
+def test_product_lists_hide_evaluation_fixtures(client, db, provider_db):
     person = patient(db)
     referral = Referral(patient_id=person.id, requested_specialty="Evaluation-only", reason="Synthetic benchmark case", is_synthetic=True, is_evaluation=True)
+    db.add(referral)
+    db.flush()
     provider = Provider(name="Evaluation Provider", specialty="Evaluation-only", location="Evaluation, CA", is_synthetic=True, is_evaluation=True)
-    db.add_all([referral, provider])
-    db.flush()
+    provider_db.add(provider)
+    provider_db.flush()
     schedule = ProviderSchedule(provider_id=provider.id, name="Evaluation", timezone="UTC")
-    db.add(schedule)
-    db.flush()
+    provider_db.add(schedule)
+    provider_db.flush()
     start = datetime.now(timezone.utc) + timedelta(days=1)
-    db.add(AppointmentSlot(schedule_id=schedule.id, start_at=start, end_at=start + timedelta(minutes=30)))
+    provider_db.add(AppointmentSlot(schedule_id=schedule.id, start_at=start, end_at=start + timedelta(minutes=30)))
+    provider_db.commit()
     db.commit()
 
     assert all(item["id"] != str(referral.id) for item in client.get("/api/referrals").json()["items"])
-    assert client.get("/api/providers?specialty=Evaluation-only").json() == []
+    assert client.get("/api/providers?specialty=Evaluation-only").json()["items"] == []
     assert client.get("/api/slots?specialty=Evaluation-only").json()["items"] == []
 
-def test_process_endpoint_persists_trace(client, db):
+def test_process_endpoint_persists_trace(client, db, provider_db):
     person = patient(db)
     db.add(Coverage(patient_id=person.id, external_id="api-cov", source="synthetic-payer", payer_name="Test Plan", member_id="member-api", status="active", is_synthetic=True))
     create = client.post("/api/referrals", json={"patient_id": str(person.id), "requested_specialty": "Cardiology", "reason": "Synthetic specialist referral", "is_synthetic": True})
     referral_id = create.json()["id"]
     db.add(ReferralDocument(referral_id=uuid.UUID(referral_id), document_type="clinical-note", storage_locator="synthetic://api-note"))
     provider = Provider(name="API Cardiologist", specialty="Cardiology", location="Test, CA", is_synthetic=True)
-    db.add(provider)
-    db.flush()
+    provider_db.add(provider)
+    provider_db.flush()
     schedule = ProviderSchedule(provider_id=provider.id, name="Clinic", timezone="UTC")
-    db.add(schedule)
-    db.flush()
+    provider_db.add(schedule)
+    provider_db.flush()
     start = datetime.now(timezone.utc) + timedelta(days=1)
-    db.add(AppointmentSlot(schedule_id=schedule.id, start_at=start, end_at=start + timedelta(minutes=30)))
+    provider_db.add(AppointmentSlot(schedule_id=schedule.id, start_at=start, end_at=start + timedelta(minutes=30)))
+    provider_db.commit()
     db.commit()
     processed = client.post(f"/api/referrals/{referral_id}/process")
     assert processed.status_code == 200
@@ -82,7 +88,7 @@ def test_process_endpoint_persists_trace(client, db):
     assert events.status_code == 200
     assert events.json()[-1]["event_type"] == "workflow_completed"
 
-def test_p2_selection_confirmation_api_is_duplicate_safe(client, db, monkeypatch):
+def test_p2_selection_confirmation_api_is_duplicate_safe(client, db, provider_db, monkeypatch):
     async def accepted(*_args, **_kwargs):
         return ["inngest-event"]
 
@@ -92,14 +98,15 @@ def test_p2_selection_confirmation_api_is_duplicate_safe(client, db, monkeypatch
     record = db.get(Referral, uuid.UUID(referral["id"]))
     record.state = ReferralState.WAITING_FOR_SLOT_SELECTION
     provider = Provider(name="API P2 Cardiologist", specialty="Cardiology", location="Test, CA", is_synthetic=True)
-    db.add(provider)
-    db.flush()
+    provider_db.add(provider)
+    provider_db.flush()
     schedule = ProviderSchedule(provider_id=provider.id, name="Clinic", timezone="UTC")
-    db.add(schedule)
-    db.flush()
+    provider_db.add(schedule)
+    provider_db.flush()
     start = datetime.now(timezone.utc) + timedelta(days=1)
     slot = AppointmentSlot(schedule_id=schedule.id, start_at=start, end_at=start + timedelta(minutes=30))
-    db.add(slot)
+    provider_db.add(slot)
+    provider_db.commit()
     db.commit()
 
     selection = {"event_id": "api-selection", "slot_id": str(slot.id)}
@@ -111,7 +118,7 @@ def test_p2_selection_confirmation_api_is_duplicate_safe(client, db, monkeypatch
     assert confirmation.status_code == 202
 
 
-def test_reprocessing_an_advanced_referral_is_a_conflict_not_a_server_error(client, db):
+def test_reprocessing_an_advanced_referral_is_a_conflict_not_a_server_error(client, db, provider_db):
     person = patient(db)
     referral = Referral(patient_id=person.id, requested_specialty="Cardiology", reason="Already advanced", state=ReferralState.CONFIRMED, is_synthetic=True)
     db.add(referral)

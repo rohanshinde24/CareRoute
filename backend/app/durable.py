@@ -6,6 +6,7 @@ import inngest.fast_api
 from sqlalchemy import select
 
 from .agent import ReferralCoordinator
+from .agent import _default_gateway
 from .booking import book_selected_slot
 from .config import settings
 from .database import SessionLocal
@@ -45,10 +46,20 @@ async def _coordinate(referral_id: uuid.UUID, workflow_run_id: uuid.UUID) -> dic
         return result.model_dump(mode="json")
 
 
-def _book(referral_id: uuid.UUID) -> dict:
+async def _book(referral_id: uuid.UUID) -> dict:
+    """Booking is a request to the provider domain now, so this step is async.
+
+    Retrying it is safe: the referral and slot determine the idempotency key, so
+    a repeated step returns the original decision rather than booking twice.
+    """
     with SessionLocal() as db:
-        appointment = book_selected_slot(db, referral_id)
-        return {"appointment_id": str(appointment.id), "slot_id": str(appointment.slot_id), "status": appointment.status.value}
+        result = await book_selected_slot(db, referral_id, _default_gateway())
+        return {
+            "appointment_id": str(result.appointment_id) if result.appointment_id else None,
+            "slot_id": str(result.slot_id),
+            "outcome": result.outcome,
+            "replayed": result.replayed,
+        }
 
 
 @inngest_client.create_function(

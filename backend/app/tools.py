@@ -8,7 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from .models import AppointmentSlot, Coverage, Patient, PatientProcedure, Provider, ProviderSchedule, Referral, ReferralDocument, ReferralState, SlotStatus
+from .models import Coverage, Patient, PatientProcedure, Referral, ReferralDocument, ReferralState
+# Provider contracts are re-exported: the MCP layer speaks the same shapes the
+# provider service serves, so a contract change cannot diverge between them.
+from .provider_contracts import ProviderListResult, ProviderSpecialtyListResult, ProviderToolResult, SlotListResult, SlotToolResult  # noqa: F401
 from .schemas import SpecialtyName
 
 class RiskClass(StrEnum):
@@ -85,31 +88,13 @@ class ProviderSearchInput(BaseModel):
     specialty: SpecialtyName
     include_evaluation: bool = False
 
-class ProviderToolResult(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    name: str
-    specialty: str
-    location: str
-    accepting_new_patients: bool
 
-class ProviderListResult(BaseModel):
-    items: list[ProviderToolResult]
 
-class ProviderSpecialtyListResult(BaseModel):
-    items: list[str]
 
 class SlotSearchInput(BaseModel):
     provider_id: uuid.UUID
 
-class SlotToolResult(BaseModel):
-    id: uuid.UUID
-    provider_id: uuid.UUID
-    start_at: datetime
-    end_at: datetime
 
-class SlotListResult(BaseModel):
-    items: list[SlotToolResult]
 
 ToolHandler = Callable[[Session, BaseModel], BaseModel]
 
@@ -174,13 +159,7 @@ def _request_document(db: Session, request: RequestDocumentInput) -> RequestDocu
     db.commit()
     return RequestDocumentResult(referral_id=referral.id, document_type=request.document_type, state=referral.state, already_waiting=already_waiting)
 
-def _find_providers(db: Session, request: ProviderSearchInput) -> ProviderListResult:
-    records = db.scalars(select(Provider).where(Provider.specialty.ilike(request.specialty), Provider.accepting_new_patients.is_(True), Provider.is_synthetic.is_(True), Provider.is_evaluation.is_(request.include_evaluation)).order_by(Provider.name)).all()
-    return ProviderListResult(items=[ProviderToolResult.model_validate(record) for record in records])
 
-def _get_slots(db: Session, request: SlotSearchInput) -> SlotListResult:
-    records = db.scalars(select(AppointmentSlot).join(ProviderSchedule).where(ProviderSchedule.provider_id == request.provider_id, AppointmentSlot.status == SlotStatus.FREE).options(joinedload(AppointmentSlot.schedule)).order_by(AppointmentSlot.start_at)).all()
-    return SlotListResult(items=[SlotToolResult(id=slot.id, provider_id=slot.schedule.provider_id, start_at=slot.start_at, end_at=slot.end_at) for slot in records])
 
 def _read_tool(name: str, input_model: type[BaseModel], output_model: type[BaseModel], handler: ToolHandler, failure: str) -> ToolDefinition:
     return ToolDefinition(name, input_model, output_model, handler, RiskClass.READ_ONLY, 5.0, True, failure)
@@ -194,8 +173,6 @@ TOOLS = {
         _read_tool("getReferralHistory", IdRequest, ReferralHistoryResult, _get_referral_history, "Return an empty list when no prior referrals are recorded."),
         _read_tool("getRecentProcedures", IdRequest, ProcedureListResult, _get_recent_procedures, "Return an empty list when no recent synthetic procedure is recorded."),
         ToolDefinition("requestMissingDocument", RequestDocumentInput, RequestDocumentResult, _request_document, RiskClass.ADMINISTRATIVE_WRITE, 5.0, True, "Fail closed without changing referral state."),
-        _read_tool("findProviders", ProviderSearchInput, ProviderListResult, _find_providers, "Return an empty list when no eligible provider exists."),
-        _read_tool("getAvailableSlots", SlotSearchInput, SlotListResult, _get_slots, "Return an empty list when no free slot exists."),
     )
 }
 

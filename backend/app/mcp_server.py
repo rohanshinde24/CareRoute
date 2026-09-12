@@ -6,6 +6,8 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from .database import SessionLocal
+from .provider_database import ProviderSessionLocal
+from .provider_gateway import configured_provider_gateway
 from .schemas import SpecialtyName
 from .tools import CoverageListResult, DocumentListResult, PatientToolResult, ProcedureListResult, ProviderListResult, ReferralHistoryResult, ReferralToolResult, RequestDocumentResult, SlotListResult, invoke_tool
 
@@ -16,6 +18,17 @@ administrative_write = ToolAnnotations(readOnlyHint=False, destructiveHint=False
 def _call(name: str, arguments: dict):
     with SessionLocal() as db:
         return invoke_tool(name, db, arguments)
+
+
+async def _provider_call(operation, correlation_id: uuid.UUID):
+    """Provider reads cross the domain boundary like every other caller's do.
+
+    Configured deployments route this over HTTP to the provider service; the
+    local gateway is used only when no provider service URL is set, and it holds
+    a provider-database session rather than the referral one.
+    """
+    with ProviderSessionLocal() as provider_db:
+        return await operation(configured_provider_gateway(provider_db))
 
 @mcp.tool(name="getReferral", annotations=read_only, structured_output=True)
 def get_referral(referral_id: Annotated[uuid.UUID, Field(description="Synthetic referral UUID")]) -> ReferralToolResult:
@@ -46,12 +59,14 @@ def request_missing_document(referral_id: Annotated[uuid.UUID, Field(description
     return _call("requestMissingDocument", {"referral_id": referral_id, "document_type": document_type})
 
 @mcp.tool(name="findProviders", annotations=read_only, structured_output=True)
-def find_providers(specialty: Annotated[SpecialtyName, Field(description="Submitted administrative specialty")]) -> ProviderListResult:
-    return _call("findProviders", {"specialty": specialty})
+async def find_providers(specialty: Annotated[SpecialtyName, Field(description="Submitted administrative specialty")]) -> ProviderListResult:
+    correlation_id = uuid.uuid4()
+    return await _provider_call(lambda gateway: gateway.find_providers(specialty, False, correlation_id), correlation_id)
 
 @mcp.tool(name="getAvailableSlots", annotations=read_only, structured_output=True)
-def get_available_slots(provider_id: Annotated[uuid.UUID, Field(description="Synthetic provider UUID")]) -> SlotListResult:
-    return _call("getAvailableSlots", {"provider_id": provider_id})
+async def get_available_slots(provider_id: Annotated[uuid.UUID, Field(description="Synthetic provider UUID")]) -> SlotListResult:
+    correlation_id = uuid.uuid4()
+    return await _provider_call(lambda gateway: gateway.get_available_slots(provider_id, correlation_id), correlation_id)
 
 if __name__ == "__main__":
     mcp.run("stdio")

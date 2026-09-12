@@ -3,7 +3,9 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import select
 
 from .database import SessionLocal
-from .models import AppointmentSlot, Coverage, Patient, PatientProcedure, Provider, ProviderSchedule, Referral, ReferralDocument
+from .models import Coverage, Patient, PatientProcedure, Referral, ReferralDocument
+from .provider_database import provider_session
+from .provider_models import AppointmentSlot, Provider, ProviderSchedule
 
 
 DEMO_CASES = (
@@ -50,7 +52,18 @@ def seed() -> None:
         if db.scalar(select(PatientProcedure).where(PatientProcedure.patient_id == maya.id, PatientProcedure.procedure_type == "Holter monitoring")) is None:
             db.add(PatientProcedure(patient_id=maya.id, procedure_type="Holter monitoring", occurred_at=datetime.now(timezone.utc) - timedelta(days=7), report_document_type="holter-report", is_synthetic=True))
 
-        start = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) + timedelta(days=2)
+        db.commit()
+
+
+def seed_providers() -> None:
+    """Seed the provider-owned database.
+
+    Deliberately not called by seed(). The referral API has no route to the
+    provider database, so provider seeding runs in the provider service - see
+    app/seed_provider.py.
+    """
+    start = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) + timedelta(days=2)
+    with provider_session() as db:
         for index, (npi, name, specialty, location) in enumerate(DEMO_PROVIDERS):
             provider = db.scalar(select(Provider).where(Provider.npi == npi))
             if provider is None:

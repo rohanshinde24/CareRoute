@@ -5,6 +5,9 @@ from typing import Any
 from sqlalchemy import Boolean, Date, DateTime, Enum, Float, ForeignKey, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
+# Provider-owned state enums are defined with the tables they describe and
+# re-exported here so referral-side imports have one source of truth.
+from .provider_models import AppointmentStatus, SlotStatus  # noqa: F401
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -25,16 +28,7 @@ class ReferralState(str, enum.Enum):
     BOOKING_FAILED = "BOOKING_FAILED"
     CANCELLED = "CANCELLED"
 
-class SlotStatus(str, enum.Enum):
-    FREE = "FREE"
-    BUSY = "BUSY"
-    CANCELLED = "CANCELLED"
 
-class AppointmentStatus(str, enum.Enum):
-    PENDING = "PENDING"
-    BOOKED = "BOOKED"
-    CANCELLED = "CANCELLED"
-    FAILED = "FAILED"
 
 class Patient(Base):
     __tablename__ = "patients"
@@ -85,7 +79,9 @@ class Referral(Base):
     is_evaluation: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
-    selected_slot_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("appointment_slots.id"), nullable=True)
+    # Cross-boundary reference to a provider-owned slot. No foreign key exists
+    # because PostgreSQL cannot enforce one across databases.
+    selected_slot_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     patient: Mapped[Patient] = relationship(back_populates="referrals")
     documents: Mapped[list["ReferralDocument"]] = relationship(back_populates="referral", cascade="all, delete-orphan")
 
@@ -99,46 +95,9 @@ class ReferralDocument(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     referral: Mapped[Referral] = relationship(back_populates="documents")
 
-class Provider(Base):
-    __tablename__ = "providers"
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    npi: Mapped[str | None] = mapped_column(String(10), unique=True)
-    name: Mapped[str] = mapped_column(String(200))
-    specialty: Mapped[str] = mapped_column(String(120), index=True)
-    location: Mapped[str] = mapped_column(String(200))
-    accepting_new_patients: Mapped[bool] = mapped_column(Boolean, default=True)
-    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=True)
-    is_evaluation: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    schedules: Mapped[list["ProviderSchedule"]] = relationship(back_populates="provider")
 
-class ProviderSchedule(Base):
-    __tablename__ = "provider_schedules"
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    provider_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("providers.id"))
-    name: Mapped[str] = mapped_column(String(120))
-    timezone: Mapped[str] = mapped_column(String(60), default="America/Los_Angeles")
-    provider: Mapped[Provider] = relationship(back_populates="schedules")
-    slots: Mapped[list["AppointmentSlot"]] = relationship(back_populates="schedule")
 
-class AppointmentSlot(Base):
-    __tablename__ = "appointment_slots"
-    __table_args__ = (UniqueConstraint("schedule_id", "start_at"),)
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    schedule_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("provider_schedules.id"))
-    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    status: Mapped[SlotStatus] = mapped_column(Enum(SlotStatus, name="slot_status"), default=SlotStatus.FREE)
-    schedule: Mapped[ProviderSchedule] = relationship(back_populates="slots")
 
-class Appointment(Base):
-    __tablename__ = "appointments"
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    referral_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("referrals.id"))
-    slot_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("appointment_slots.id"))
-    idempotency_key: Mapped[str] = mapped_column(String(200), unique=True)
-    status: Mapped[AppointmentStatus] = mapped_column(Enum(AppointmentStatus, name="appointment_status"), default=AppointmentStatus.PENDING)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 class WorkflowRun(Base):
     __tablename__ = "workflow_runs"

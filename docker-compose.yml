@@ -17,6 +17,23 @@ services:
       - "55432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+  # The provider domain owns its storage: separate instance, separate volume,
+  # separate health check, separate migration lineage.
+  provider-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: careroute_provider
+      POSTGRES_USER: careroute
+      POSTGRES_PASSWORD: careroute
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U careroute -d careroute_provider"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "55433:5432"
+    volumes:
+      - provider_postgres_data:/var/lib/postgresql/data
   api:
     build: ./backend
     environment:
@@ -47,9 +64,9 @@ services:
         condition: service_healthy
   provider-service:
     build: ./backend
-    command: uvicorn app.provider_service:app --host 0.0.0.0 --port 8010
+    command: sh -c "alembic -c alembic_provider.ini upgrade head && uvicorn app.provider_service:app --host 0.0.0.0 --port 8010"
     environment:
-      DATABASE_URL: postgresql+psycopg://careroute:careroute@db:5432/careroute
+      PROVIDER_DATABASE_URL: postgresql+psycopg://careroute:careroute@provider-db:5432/careroute_provider
       PROVIDER_INTERNAL_TOKEN: ${PROVIDER_INTERNAL_TOKEN:-careroute-local-synthetic}
       TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://otel-collector:4318/v1/traces}
@@ -59,7 +76,7 @@ services:
       OTEL_METRIC_EXPORT_INTERVAL_SECONDS: ${OTEL_METRIC_EXPORT_INTERVAL_SECONDS:-15}
     ports: ["8010:8010"]
     depends_on:
-      db:
+      provider-db:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health')"]
@@ -131,6 +148,7 @@ services:
     depends_on: [api]
 volumes:
   postgres_data:
+  provider_postgres_data:
   tempo_data:
   grafana_data:
   prometheus_data:

@@ -7,30 +7,30 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.database import get_db
-from app.models import AppointmentSlot, Provider, ProviderSchedule
+from app.provider_database import get_provider_db
+from app.provider_models import AppointmentSlot, Provider, ProviderSchedule
 from app.provider_gateway import HttpProviderGateway, ProviderGatewayProtocolError, ProviderGatewayTransientError
 from app.provider_service import app as provider_app
 
 
-def _provider(db, *, name: str, evaluation: bool = False):
+def _provider(provider_db, *, name: str, evaluation: bool = False):
     provider = Provider(name=name, specialty="Cardiology", location="San Francisco, CA", is_synthetic=True, is_evaluation=evaluation)
-    db.add(provider)
-    db.flush()
+    provider_db.add(provider)
+    provider_db.flush()
     schedule = ProviderSchedule(provider_id=provider.id, name=f"{name} schedule", timezone="UTC")
-    db.add(schedule)
-    db.flush()
+    provider_db.add(schedule)
+    provider_db.flush()
     start = datetime.now(timezone.utc) + timedelta(days=1)
     slot = AppointmentSlot(schedule_id=schedule.id, start_at=start, end_at=start + timedelta(minutes=30))
-    db.add(slot)
-    db.commit()
+    provider_db.add(slot)
+    provider_db.commit()
     return provider, slot
 
 
-def test_provider_service_enforces_evaluation_isolation_and_correlation(db):
-    visible, _ = _provider(db, name="Visible Provider")
-    hidden, _ = _provider(db, name="Hidden Provider", evaluation=True)
-    provider_app.dependency_overrides[get_db] = lambda: db
+def test_provider_service_enforces_evaluation_isolation_and_correlation(provider_db):
+    visible, _ = _provider(provider_db, name="Visible Provider")
+    hidden, _ = _provider(provider_db, name="Hidden Provider", evaluation=True)
+    provider_app.dependency_overrides[get_provider_db] = lambda: provider_db
     correlation_id = str(uuid.uuid4())
     try:
         with TestClient(provider_app) as client:
@@ -53,9 +53,9 @@ def test_provider_service_enforces_evaluation_isolation_and_correlation(db):
         provider_app.dependency_overrides.clear()
 
 
-def test_provider_service_hides_evaluation_slot_without_trusted_header(db):
-    hidden, slot = _provider(db, name="Hidden Slot Provider", evaluation=True)
-    provider_app.dependency_overrides[get_db] = lambda: db
+def test_provider_service_hides_evaluation_slot_without_trusted_header(provider_db):
+    hidden, slot = _provider(provider_db, name="Hidden Slot Provider", evaluation=True)
+    provider_app.dependency_overrides[get_provider_db] = lambda: provider_db
     try:
         with TestClient(provider_app) as client:
             assert client.get(f"/internal/providers/{hidden.id}/slots").status_code == 404

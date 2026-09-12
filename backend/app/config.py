@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     # concurrent database-touching requests, work queues on checkout instead of
     # failing, so the ceiling shows up as latency with idle CPU and is invisible
     # unless it is written down.
+    provider_database_url: str = "postgresql+psycopg://careroute:careroute@localhost:5433/careroute_provider"
     db_pool_size: int = 5
     db_max_overflow: int = 10
     db_pool_timeout: float = 30.0

@@ -3,7 +3,8 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from .models import AppointmentSlot, ProcessedEvent, ProviderSchedule, Referral, ReferralDocument, ReferralState, SlotStatus
+from .models import ProcessedEvent, Referral, ReferralDocument, ReferralState
+from .provider_gateway import ProviderGateway
 from .workflow import InvalidTransition, audit, transition
 
 
@@ -39,17 +40,19 @@ def receive_document(db: Session, referral: Referral, event_id: str, document_ty
     return document, False
 
 
-def select_slot(db: Session, referral: Referral, event_id: str, slot_id: uuid.UUID) -> bool:
+async def select_slot(db: Session, referral: Referral, event_id: str, slot_id: uuid.UUID, gateway: ProviderGateway) -> bool:
     referral = db.scalar(select(Referral).where(Referral.id == referral.id).with_for_update())
     payload = {"slot_id": str(slot_id)}
     if _existing(db, event_id, "slot.selected", referral.id, payload):
         return True
     if referral.state not in {ReferralState.WAITING_FOR_SLOT_SELECTION, ReferralState.BOOKING_FAILED}:
         raise InvalidTransition(f"Cannot select a slot while referral is {referral.state.value}")
-    slot = db.scalar(select(AppointmentSlot).where(AppointmentSlot.id == slot_id).options(joinedload(AppointmentSlot.schedule).joinedload(ProviderSchedule.provider)))
-    if slot is None or slot.status != SlotStatus.FREE:
+    # Eligibility facts belong to the provider domain, so they are asked for
+    # rather than read. Selection still reserves nothing; booking is the arbiter.
+    slot = await gateway.describe_slot(slot_id, referral.id)
+    if slot is None or not slot.is_free:
         raise CommandConflict("Selected slot is not available")
-    if slot.schedule.provider.specialty.casefold() != referral.requested_specialty.casefold():
+    if slot.provider_specialty.casefold() != referral.requested_specialty.casefold():
         raise CommandConflict("Selected slot does not match the requested specialty")
     if referral.state == ReferralState.BOOKING_FAILED:
         transition(referral, ReferralState.WAITING_FOR_SLOT_SELECTION)
