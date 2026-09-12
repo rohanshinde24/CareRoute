@@ -39,14 +39,18 @@ This is auditable rather than asserted. Every model turn emits an `agent.turn` s
 Browser / Next.js
        |
        v
-Referral API (FastAPI) ----------------> PostgreSQL
-       |
+Referral API (FastAPI) ----------------> Referral PostgreSQL
+       |                                 (referrals, patients, coverage,
+       |                                  documents, workflow state)
        +---- local Ollama or Gemini (bounded proposals only)
        |
-       | typed HTTP gateway: timeouts, bounded retry/backoff,
-       | response validation, correlation IDs, trace propagation
+       | typed HTTP gateway: timeouts, bounded retry with jitter,
+       | idempotency keys, response validation, correlation IDs,
+       | trace propagation
        v
-Provider service (FastAPI)
+Provider service (FastAPI) ------------> Provider PostgreSQL
+                                         (providers, schedules, slots,
+                                          appointments, booking attempts)
 
 Referral API + Provider service
        |
@@ -57,9 +61,13 @@ OpenTelemetry Collector --> Grafana Tempo --> Grafana
 Referral API <--> Inngest (durable workflow steps, waits, retries)
 ```
 
-The provider service independently owns specialty discovery, eligible-provider search, and free-slot reads. The referral API reaches it only through a typed asynchronous gateway that separates transient failures (timeouts, connection errors, 429, selected 5xx) from permanent protocol failures, and fails closed on malformed payloads and correlation mismatches.
+**The two services own separate databases.** The provider domain owns providers, schedules, slots, appointments, and booking records; the referral domain owns everything else. Neither reads the other's tables. References that cross the boundary are validated UUIDs with no foreign key, because a foreign key cannot be enforced across databases.
 
-The referral API owns referral coordination, model adapters, patient and coverage tools, MCP, FHIR translation, commands, and booking.
+The referral API reaches the provider service only through a typed asynchronous gateway that separates transient failures (timeouts, connection errors, 429, selected 5xx) from permanent protocol failures, and fails closed on malformed payloads and correlation mismatches. Retries use exponential backoff with full jitter.
+
+**Booking executes inside the provider service**, where the slot and the appointment live, so the lock, the slot state change, and the appointment write remain a single transaction. It is requested with a caller-supplied idempotency key, and the provider side records its decision — refusals as well as successes — so a caller that loses the response can repeat the request and learn the original outcome rather than act twice.
+
+The referral API owns referral coordination, the workflow state machine, confirmation gating, model adapters, patient and coverage tools, MCP, and FHIR translation.
 
 ### Workflow states
 
@@ -71,7 +79,7 @@ Transitions are deterministic. Ambiguity routes to `NEEDS_HUMAN_REVIEW` rather t
 
 - **Durable workflows** via Inngest: retryable and memoized steps, waits, timeouts, and cancellation.
 - **Idempotent commands**: document arrival, slot selection, confirmation, and cancellation are deduplicated, so a retried or duplicated request cannot double-apply.
-- **Effectively-once booking**: confirmation-gated and row-locked, so concurrent confirmations cannot produce two appointments for one slot.
+- **Effectively-once booking**: confirmation-gated and row-locked inside the provider database, so concurrent confirmations cannot produce two appointments for one slot. Proven by tests that race several bookings at a single slot.
 - **Recovery**: lost responses and stale slot selections are handled explicitly rather than assumed away.
 
 ## Observability
@@ -172,8 +180,9 @@ Python 3.12+, FastAPI, SQLAlchemy, Alembic, PostgreSQL 16, Inngest, OpenTelemetr
 
 Stated plainly, because a system like this is only as trustworthy as its honesty about what it isn't:
 
-- Both services currently share one PostgreSQL database. The service boundary is real at the API layer; data ownership is not yet distributed.
-- Booking's guarantee holds because referral, slot, and appointment records share one transaction. It is not a distributed guarantee and is not claimed as one.
+- Booking's guarantee holds because the slot and appointment share one transaction in the provider database. It is not a distributed guarantee and is not claimed as one.
+- The referral state change that follows a booking is a second transaction in the other database. The appointment is authoritative if one is interrupted, and repair is forward-only. There is no automatic reconciler yet.
+- There are no asynchronous domain events, outbox, or message broker yet.
 - Provider matching uses case-insensitive location substring comparison — not geocoding, distance, travel time, payer network, language, or subspecialty.
 - The Inngest dev server keeps run history in memory; domain state lives in PostgreSQL.
 - No end-user authentication or authorization, binary document storage, payer integration, centralized logging, or hosted deployment.
