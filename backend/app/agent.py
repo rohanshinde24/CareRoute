@@ -1,4 +1,5 @@
 import enum
+import time
 import uuid
 from typing import Any
 
@@ -13,6 +14,7 @@ from .workflow import transition
 from .faults import FaultInjector
 from .investigation import DocumentInvestigator, InvestigationPolicyError, ProviderInvestigator, SpecialtyInvestigator
 from .telemetry import current_trace_id, operation, set_current_attributes, set_span_attributes, traced
+from .metrics import record_model_call, record_model_confidence, record_workflow_run
 
 class NextAction(str, enum.Enum):
     PRESENT_SLOTS = "PRESENT_SLOTS"
@@ -78,7 +80,10 @@ class ReferralCoordinator:
         try:
             self.fault_injector.hit("model_timeout")
             with operation("careroute.model.interpret", {"careroute.model.provider": self.model.name}) as model_span:
+                started = time.perf_counter()
                 interpretation = await self.model.interpret(ReferralModelInput(requested_specialty=referral_data.requested_specialty, reason=referral_data.reason))
+                record_model_call(time.perf_counter() - started, self.model.name)
+                record_model_confidence(interpretation.confidence, self.model.name)
                 set_span_attributes(
                     model_span,
                     {
@@ -193,6 +198,7 @@ class ReferralCoordinator:
                 "careroute.workflow.next_action": action.value,
             },
         ):
+            record_workflow_run(state.value)
             transition(referral, state)
             run.state = state
             self.db.commit()

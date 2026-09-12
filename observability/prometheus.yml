@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+scrape_configs:
+  # The Collector is the only scrape target. CareRoute services export OTLP to
+  # the Collector and never expose a scrape endpoint of their own.
+  - job_name: careroute-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]

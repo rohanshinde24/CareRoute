@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
+from .metrics import record_booking_attempt
 from .models import Appointment, AppointmentSlot, AppointmentStatus, ProcessedEvent, ProviderSchedule, Referral, ReferralState, SlotStatus
 from .workflow import audit, transition
 from .faults import FaultInjector
@@ -27,6 +28,7 @@ def book_selected_slot(db: Session, referral_id: uuid.UUID, fault_injector: Faul
     key = booking_key(referral.id, referral.selected_slot_id)
     existing = db.scalar(select(Appointment).where(Appointment.idempotency_key == key))
     if existing is not None:
+        record_booking_attempt("duplicate_suppressed")
         return existing
     if referral.state != ReferralState.WAITING_FOR_SLOT_SELECTION:
         raise BookingError(f"Referral cannot be booked from {referral.state.value}")
@@ -51,6 +53,7 @@ def book_selected_slot(db: Session, referral_id: uuid.UUID, fault_injector: Faul
         transition(referral, ReferralState.BOOKING_FAILED)
         audit(db, referral.id, "booking_failed", {"reason": "selected_slot_unavailable", "slot_id": str(referral.selected_slot_id)})
         db.commit()
+        record_booking_attempt("slot_unavailable")
         raise BookingError("Selected slot is no longer available")
     if slot.schedule.provider.specialty.casefold() != referral.requested_specialty.casefold():
         transition(referral, ReferralState.BOOKING_FAILED)
@@ -71,4 +74,5 @@ def book_selected_slot(db: Session, referral_id: uuid.UUID, fault_injector: Faul
     db.commit()
     db.refresh(appointment)
     fault_injector.hit("booking_response_loss")
+    record_booking_attempt("booked")
     return appointment

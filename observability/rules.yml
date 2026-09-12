@@ -1,0 +1,66 @@
+groups:
+  - name: careroute-safety
+    interval: 30s
+    rules:
+      # The deterministic layer rejecting model proposals is correct behavior.
+      # A sustained rise in that rate is not: it means the model is drifting
+      # away from what policy will accept.
+      - alert: CareRouteFailClosedRateHigh
+        expr: |
+          sum(rate(careroute_policy_validations_total{outcome="rejected"}[10m]))
+            /
+          clamp_min(sum(rate(careroute_policy_validations_total[10m])), 0.001)
+            > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Deterministic policy is rejecting over 20% of model proposals"
+
+      # Effectively-once booking is a core guarantee. Any duplicate at all is
+      # a correctness signal, not a capacity one.
+      - alert: CareRouteDuplicateBooking
+        expr: increase(careroute_booking_attempts_total{result="duplicate_suppressed"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Idempotent booking suppressed a duplicate; investigate the caller"
+
+  - name: careroute-distribution
+    interval: 30s
+    rules:
+      - alert: CareRouteProviderGatewayErrors
+        expr: |
+          sum(rate(careroute_provider_requests_total{outcome!="success"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Provider gateway is returning non-success outcomes"
+
+      - alert: CareRouteProviderRetryExhaustion
+        expr: increase(careroute_provider_retry_exhausted_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Provider gateway exhausted its bounded retries"
+
+      - alert: CareRouteModelLatencyHigh
+        expr: |
+          histogram_quantile(0.95, sum(rate(careroute_model_latency_seconds_bucket[10m])) by (le)) > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model p95 latency above 30s"
+
+      - alert: CareRouteWorkflowsNeedingReview
+        expr: |
+          increase(careroute_workflow_runs_total{terminal_state="NEEDS_HUMAN_REVIEW"}[30m]) > 5
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Workflows are escalating to human review at an elevated rate"

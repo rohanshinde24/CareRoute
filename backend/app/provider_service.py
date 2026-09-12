@@ -10,6 +10,7 @@ from .models import Provider
 from .schemas import SpecialtyName
 from .tools import ProviderListResult, ProviderSpecialtyListResult, SlotListResult, invoke_tool
 from .telemetry import configure_telemetry
+from .metrics import configure_metrics
 
 
 app = FastAPI(title="CareRoute Provider Service", version="0.1.0")
@@ -80,3 +81,4 @@ def get_available_slots(
 
 
 configure_telemetry(app, "careroute-provider-service", engine)
+configure_metrics("careroute-provider-service")

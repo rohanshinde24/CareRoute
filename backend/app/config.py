@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     telemetry_enabled: bool = False
     otel_exporter_otlp_traces_endpoint: str = "http://localhost:4318/v1/traces"
     otel_export_timeout_seconds: float = 2.0
+    metrics_enabled: bool = False
+    otel_exporter_otlp_metrics_endpoint: str = "http://localhost:4318/v1/metrics"
+    otel_metric_export_interval_seconds: float = 15.0
     inngest_is_production: bool = False
     inngest_event_key: str | None = None
     inngest_signing_key: str | None = None

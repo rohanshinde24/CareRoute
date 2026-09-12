@@ -18,12 +18,27 @@ processors:
   batch:
     timeout: 1s
     send_batch_size: 512
+  # service.instance.id is regenerated on every process start. Left in place the
+  # Prometheus exporter emits it as `exported_instance`, so each restart would
+  # create a new time series for every metric. Strip it before export.
+  resource/strip_instance_id:
+    attributes:
+      - key: service.instance.id
+        action: delete
 
 exporters:
   otlp_http/tempo:
     endpoint: http://tempo:4318
     tls:
       insecure: true
+  # Prometheus scrapes the Collector. Applications stay unaware that Prometheus
+  # exists and continue to speak only OTLP to this process.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # No resource-to-label promotion. Converting resource attributes wholesale
+    # would also promote service.instance.id, a per-process UUID, turning every
+    # restart into a new time series. Service identity instead arrives as an
+    # explicit `service` label from the application allowlist in app/metrics.py.
 
 service:
   extensions: [health_check]
@@ -32,3 +47,7 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [otlp_http/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/strip_instance_id, batch]
+      exporters: [prometheus]

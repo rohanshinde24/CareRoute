@@ -1,0 +1,17 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: false
+    editable: false
+    jsonData:
+      httpMethod: POST
+      # Metrics answer "is something wrong"; traces answer "which run and why".
+      # Exemplars are the bridge between the two.
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo

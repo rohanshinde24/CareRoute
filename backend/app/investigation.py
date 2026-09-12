@@ -8,6 +8,7 @@ from .faults import FaultInjector
 from .provider_gateway import ProviderGateway
 from .tools import DocumentListResult, ProcedureListResult, ProviderToolResult, ReferralHistoryResult, SlotListResult, invoke_tool
 from .telemetry import operation, set_current_attributes, set_span_attributes, traced
+from .metrics import record_agent_turns, record_policy_validation
 
 
 class InvestigationPolicyError(ValueError):
@@ -39,8 +40,16 @@ class SpecialtyInvestigator:
                 decision = await self.model.investigate(InvestigationInput(referral_reason=referral.reason, submitted_specialty=referral.requested_specialty, candidate_specialties=candidates, available_actions=available, observations=observations))
                 set_span_attributes(turn_span, {"careroute.agent.action": decision.action.value})
                 with operation("careroute.agent.policy.validate", {"careroute.agent.kind": "specialty", "careroute.agent.action": decision.action.value}) as policy_span:
-                    self._validate(decision, available, candidates, referral, observations)
+                    try:
+                        self._validate(decision, available, candidates, referral, observations)
+                    except Exception:
+                        record_policy_validation("rejected", "specialty")
+                        # A fail-closed investigation still consumed turns; without
+                        # this the histogram omits exactly the interesting cases.
+                        record_agent_turns(turn + 1, "specialty")
+                        raise
                     set_span_attributes(policy_span, {"careroute.policy.outcome": "accepted"})
+                    record_policy_validation("accepted", "specialty")
             self._event("investigation_decision", {"turn": turn + 1, "action": decision.action.value, "evidence_sources": sorted(observations)})
             if decision.action == InvestigationAction.GET_DOCUMENTS:
                 result = invoke_tool("getReferralDocuments", self.db, {"id": referral.id})
@@ -55,11 +64,14 @@ class SpecialtyInvestigator:
                 tool_calls += 1
                 self._event("investigation_observation", {"tool": "getReferralHistory", "result_count": len(result.items)})
             elif decision.action == InvestigationAction.PROPOSE_SPECIALTY:
+                record_agent_turns(turn + 1, "specialty")
                 self._event("investigation_completed", {"outcome": "specialty_proposed", "specialty": decision.proposed_specialty, "turns": turn + 1, "tool_calls": tool_calls})
                 return decision.proposed_specialty
             else:
+                record_agent_turns(turn + 1, "specialty")
                 self._event("investigation_completed", {"outcome": decision.action.value, "turns": turn + 1, "tool_calls": tool_calls})
                 return None
+        record_agent_turns(self.max_turns, "specialty")
         self._event("investigation_completed", {"outcome": "turn_limit", "turns": self.max_turns, "tool_calls": tool_calls})
         return None
 
@@ -113,8 +125,16 @@ class DocumentInvestigator:
                 decision = await self.model.investigate_documents(DocumentInvestigationInput(referral_reason=referral.reason, specialty=specialty, current_document_types=sorted(current_document_types), candidate_document_types=self.candidate_document_types, available_actions=available, observations=observations))
                 set_span_attributes(turn_span, {"careroute.agent.action": decision.action.value})
                 with operation("careroute.agent.policy.validate", {"careroute.agent.kind": "document", "careroute.agent.action": decision.action.value}) as policy_span:
-                    self._validate(decision, available, referral, current_document_types, observations)
+                    try:
+                        self._validate(decision, available, referral, current_document_types, observations)
+                    except Exception:
+                        record_policy_validation("rejected", "document")
+                        # A fail-closed investigation still consumed turns; without
+                        # this the histogram omits exactly the interesting cases.
+                        record_agent_turns(turn + 1, "document")
+                        raise
                     set_span_attributes(policy_span, {"careroute.policy.outcome": "accepted"})
+                    record_policy_validation("accepted", "document")
             self._event("document_investigation_decision", {"turn": turn + 1, "action": decision.action.value, "evidence_sources": sorted(observations)})
             if decision.action == DocumentInvestigationAction.GET_RECENT_PROCEDURES:
                 result = invoke_tool("getRecentProcedures", self.db, {"id": referral.patient_id})
@@ -129,11 +149,14 @@ class DocumentInvestigator:
                 tool_calls += 1
                 self._event("document_investigation_observation", {"tool": "getReferralHistory", "result_count": len(result.items)})
             elif decision.action == DocumentInvestigationAction.PROPOSE_DOCUMENT:
+                record_agent_turns(turn + 1, "document")
                 self._event("document_investigation_completed", {"outcome": "document_proposed", "document_type": decision.proposed_document_type, "turns": turn + 1, "tool_calls": tool_calls})
                 return decision.proposed_document_type
             else:
+                record_agent_turns(turn + 1, "document")
                 self._event("document_investigation_completed", {"outcome": decision.action.value, "turns": turn + 1, "tool_calls": tool_calls})
                 return None
+        record_agent_turns(self.max_turns, "document")
         self._event("document_investigation_completed", {"outcome": "turn_limit", "turns": self.max_turns, "tool_calls": tool_calls})
         return None
 
@@ -184,6 +207,7 @@ class ProviderInvestigator:
         candidates = [ProviderCandidate(id=provider.id, location=provider.location) for provider in providers]
         matching = [candidate for candidate in candidates if referral.location_preference.casefold() in candidate.location.casefold()]
         if not matching:
+            record_agent_turns(0, "provider")
             self._event("provider_investigation_completed", {"outcome": "no_location_match", "turns": 0, "tool_calls": 0})
             return None
         if len(matching) > self.max_tool_calls:
@@ -197,8 +221,16 @@ class ProviderInvestigator:
                 decision = await self.model.investigate_providers(ProviderInvestigationInput(referral_id=referral.id, location_preference=referral.location_preference, candidate_providers=candidates, available_actions=available, observations=observations))
                 set_span_attributes(turn_span, {"careroute.agent.action": decision.action.value})
                 with operation("careroute.agent.policy.validate", {"careroute.agent.kind": "provider", "careroute.agent.action": decision.action.value}) as policy_span:
-                    self._validate(decision, available, candidates, referral.location_preference, observations)
+                    try:
+                        self._validate(decision, available, candidates, referral.location_preference, observations)
+                    except Exception:
+                        record_policy_validation("rejected", "provider")
+                        # A fail-closed investigation still consumed turns; without
+                        # this the histogram omits exactly the interesting cases.
+                        record_agent_turns(turn + 1, "provider")
+                        raise
                     set_span_attributes(policy_span, {"careroute.policy.outcome": "accepted"})
+                    record_policy_validation("accepted", "provider")
             self._event("provider_investigation_decision", {"turn": turn + 1, "action": decision.action.value, "evidence_sources": sorted(observations)})
             if decision.action == ProviderInvestigationAction.GET_AVAILABLE_SLOTS:
                 self.fault_injector.hit("tool:getAvailableSlots")
@@ -208,11 +240,14 @@ class ProviderInvestigator:
                 tool_calls += 1
                 self._event("provider_investigation_observation", {"tool": "getAvailableSlots", "provider_id": str(decision.target_provider_id), "result_count": len(result.items)})
             elif decision.action == ProviderInvestigationAction.PROPOSE_PROVIDER:
+                record_agent_turns(turn + 1, "provider")
                 self._event("provider_investigation_completed", {"outcome": "provider_proposed", "provider_id": str(decision.proposed_provider_id), "turns": turn + 1, "tool_calls": tool_calls})
                 return decision.proposed_provider_id
             else:
+                record_agent_turns(turn + 1, "provider")
                 self._event("provider_investigation_completed", {"outcome": decision.action.value, "turns": turn + 1, "tool_calls": tool_calls})
                 return None
+        record_agent_turns(self.max_turns, "provider")
         self._event("provider_investigation_completed", {"outcome": "turn_limit", "turns": self.max_turns, "tool_calls": tool_calls})
         return None
 

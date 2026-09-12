@@ -41,7 +41,8 @@ def test_tempo_owns_trace_storage_and_otlp_ingestion():
     assert set(config["distributor"]["receivers"]["otlp"]["protocols"]) == {"grpc", "http"}
     assert config["storage"]["trace"]["backend"] == "local"
     assert config["storage"]["trace"]["local"]["path"] == "/var/tempo/blocks"
-    assert config["compactor"]["compaction"]["block_retention"] == "24h"
+    # P4B.1 owns "retention is configured"; P4C owns the value it is set to.
+    assert config["compactor"]["compaction"]["block_retention"]
 
 
 def test_grafana_provisions_tempo_without_manual_setup():
@@ -53,3 +54,70 @@ def test_grafana_provisions_tempo_without_manual_setup():
     assert datasource["url"] == "http://tempo:3200"
     assert datasource["isDefault"] is True
     assert datasource["editable"] is False
+
+
+def test_collector_has_a_bounded_metrics_pipeline_exporting_to_prometheus():
+    collector = _yaml("observability/otel-collector.yml")
+    pipeline = collector["service"]["pipelines"]["metrics"]
+
+    assert pipeline["receivers"] == ["otlp"]
+    assert pipeline["processors"] == ["memory_limiter", "resource/strip_instance_id", "batch"]
+    assert pipeline["exporters"] == ["prometheus"]
+    assert collector["exporters"]["prometheus"]["endpoint"] == "0.0.0.0:8889"
+
+    # service.instance.id is a per-process UUID. Exported as a label it makes every
+    # restart a new time series, so it must be deleted before export.
+    strip = collector["processors"]["resource/strip_instance_id"]["attributes"]
+    assert {"key": "service.instance.id", "action": "delete"} in strip
+    assert "resource_to_telemetry_conversion" not in collector["exporters"]["prometheus"]
+
+
+def test_prometheus_scrapes_only_the_collector_and_apps_expose_no_endpoint():
+    prometheus = _yaml("observability/prometheus.yml")
+    targets = [target for job in prometheus["scrape_configs"] for config in job["static_configs"] for target in config["targets"]]
+
+    assert targets == ["otel-collector:8889"]
+    compose = _yaml("docker-compose.yml")
+    for service in ("api", "provider-service"):
+        environment = compose["services"][service]["environment"]
+        assert "http://otel-collector:4318/v1/metrics" in environment["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"]
+        assert "9090" not in str(compose["services"][service].get("ports", []))
+
+
+def test_prometheus_service_is_pinned_durable_and_retained():
+    service = _yaml("docker-compose.yml")["services"]["prometheus"]
+
+    assert service["image"] == "prom/prometheus:v3.7.3"
+    assert any("--storage.tsdb.retention.time=15d" == argument for argument in service["command"])
+    assert any(volume.endswith(":ro") and "prometheus.yml" in volume for volume in service["volumes"])
+    assert any(volume.startswith("prometheus_data:") for volume in service["volumes"])
+    assert "prometheus_data" in _yaml("docker-compose.yml")["volumes"]
+
+
+def test_grafana_provisions_prometheus_with_exemplar_linkage_to_tempo():
+    datasource = _yaml("observability/grafana/provisioning/datasources/prometheus.yml")["datasources"][0]
+
+    assert datasource["uid"] == "prometheus"
+    assert datasource["type"] == "prometheus"
+    assert datasource["url"] == "http://prometheus:9090"
+    assert datasource["editable"] is False
+    assert datasource["jsonData"]["exemplarTraceIdDestinations"][0]["datasourceUid"] == "tempo"
+
+
+def test_alert_rules_cover_safety_and_distribution_signals():
+    groups = _yaml("observability/rules.yml")["groups"]
+    alerts = {rule["alert"] for group in groups for rule in group["rules"]}
+
+    assert {
+        "CareRouteFailClosedRateHigh",
+        "CareRouteDuplicateBooking",
+        "CareRouteProviderGatewayErrors",
+        "CareRouteProviderRetryExhaustion",
+        "CareRouteModelLatencyHigh",
+        "CareRouteWorkflowsNeedingReview",
+    } <= alerts
+
+
+def test_trace_evidence_outlives_a_phase():
+    # P4B.1 evidence expired under the original 24h retention.
+    assert _yaml("observability/tempo.yml")["compactor"]["compaction"]["block_retention"] == "336h"

@@ -13,6 +13,7 @@ from .config import Settings, settings
 from .models import Provider
 from .tools import ProviderListResult, ProviderSpecialtyListResult, SlotListResult, invoke_tool
 from .telemetry import operation, set_span_attributes
+from .metrics import record_provider_request, record_provider_retry_exhausted
 
 
 class ProviderGatewayError(RuntimeError):
@@ -111,24 +112,30 @@ class HttpProviderGateway:
                         set_span_attributes(attempt_span, {"http.response.status_code": response.status_code})
                         if response.status_code in self.retryable_statuses:
                             set_span_attributes(attempt_span, {"careroute.provider.outcome": "transient_failure"})
+                            record_provider_request(operation_name, "transient_failure")
                             raise ProviderGatewayTransientError(f"Provider service returned retryable HTTP {response.status_code}")
                         if response.is_error:
                             set_span_attributes(attempt_span, {"careroute.provider.outcome": "protocol_failure"})
+                            record_provider_request(operation_name, "protocol_failure")
                             raise ProviderGatewayProtocolError(f"Provider service returned HTTP {response.status_code}")
                         if response.headers.get("X-CareRoute-Correlation-ID") != str(correlation_id):
                             set_span_attributes(attempt_span, {"careroute.provider.outcome": "protocol_failure"})
+                            record_provider_request(operation_name, "protocol_failure")
                             raise ProviderGatewayProtocolError("Provider service did not preserve the correlation ID")
                         try:
                             payload = response.json()
                         except ValueError as exc:
                             set_span_attributes(attempt_span, {"careroute.provider.outcome": "protocol_failure"})
+                            record_provider_request(operation_name, "protocol_failure")
                             raise ProviderGatewayProtocolError("Provider service returned invalid JSON") from exc
                         set_span_attributes(attempt_span, {"careroute.provider.outcome": "success"})
+                        record_provider_request(operation_name, "success")
                         return payload
                 except (httpx.TimeoutException, httpx.NetworkError, ProviderGatewayTransientError) as exc:
                     last_error = exc
                     if attempt + 1 < self.config.provider_retry_attempts:
                         await self.sleep(self.config.provider_retry_backoff_seconds * (2**attempt))
+            record_provider_retry_exhausted(operation_name)
             raise ProviderGatewayTransientError(f"Provider service unavailable after {self.config.provider_retry_attempts} attempts") from last_error
 
     @staticmethod

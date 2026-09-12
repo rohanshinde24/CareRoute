@@ -17,6 +17,7 @@ from .durable import mount_inngest, send_event
 from .schemas import AgentEventRead, AppointmentRead, Cancellation, CommandRead, Confirmation, DocumentCreate, DurableProcessCreate, DurableProcessRead, PatientRead, ProviderRead, ReferralCreate, ReferralDetail, ReferralRead, SlotRead, SlotSelection, WorkflowRead
 from .workflow import InvalidTransition
 from .telemetry import configure_telemetry
+from .metrics import configure_metrics
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -187,3 +188,4 @@ def get_workflow_events(workflow_id: uuid.UUID, db: Session = Depends(get_db)):
 
 
 configure_telemetry(app, "careroute-api", engine)
+configure_metrics("careroute-api")
