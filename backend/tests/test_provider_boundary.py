@@ -100,7 +100,9 @@ def test_http_gateway_retries_transient_response_and_propagates_correlation():
 
     assert result.items == []
     assert attempts == 2
-    assert sleeps == [0.01]
+    # Full jitter: one bounded wait in [0, base * 2**attempt), not a fixed delay.
+    assert len(sleeps) == 1
+    assert 0 <= sleeps[0] < 0.01
 
 
 def test_http_gateway_exhausts_bounded_retries():
@@ -151,3 +153,20 @@ def test_http_gateway_rejects_protocol_violations(headers, payload, message):
     gateway = HttpProviderGateway(_settings(), transport=httpx.MockTransport(handler))
     with pytest.raises(ProviderGatewayProtocolError, match=message):
         asyncio.run(gateway.find_providers("Cardiology", False, correlation_id))
+
+
+def test_backoff_is_exponentially_bounded_and_jittered():
+    """Retry delays must grow exponentially and must not be identical across clients.
+
+    Identical delays mean every client that failed on one outage retries in the
+    same instant, so recovery is met by a synchronised burst.
+    """
+    gateway = HttpProviderGateway(_settings(provider_retry_attempts=5), transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+
+    for attempt in range(5):
+        ceiling = 0.01 * (2**attempt)
+        samples = [gateway._backoff_delay(attempt) for _ in range(200)]
+        assert all(0 <= sample < ceiling for sample in samples), f"attempt {attempt} exceeded its ceiling"
+        assert len(set(samples)) > 1, f"attempt {attempt} produced a fixed delay; the herd is not spread"
+        if attempt > 0:
+            assert max(samples) > 0.01, "backoff is not growing with attempt"

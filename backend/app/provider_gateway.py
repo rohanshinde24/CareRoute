@@ -1,4 +1,5 @@
 import asyncio
+import random
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Protocol
@@ -134,9 +135,20 @@ class HttpProviderGateway:
                 except (httpx.TimeoutException, httpx.NetworkError, ProviderGatewayTransientError) as exc:
                     last_error = exc
                     if attempt + 1 < self.config.provider_retry_attempts:
-                        await self.sleep(self.config.provider_retry_backoff_seconds * (2**attempt))
+                        await self.sleep(self._backoff_delay(attempt))
             record_provider_retry_exhausted(operation_name)
             raise ProviderGatewayTransientError(f"Provider service unavailable after {self.config.provider_retry_attempts} attempts") from last_error
+
+    def _backoff_delay(self, attempt: int) -> float:
+        """Exponential backoff with full jitter.
+
+        Without jitter every client that failed on the same provider outage retries
+        at the same instants, so recovery is met by a synchronised burst - the
+        thundering herd that caused the outage to persist. Full jitter spreads the
+        retries uniformly across the window instead of clustering them at its edge.
+        """
+        ceiling = self.config.provider_retry_backoff_seconds * (2**attempt)
+        return random.uniform(0, ceiling)
 
     @staticmethod
     def _validate(model_type, payload: dict):

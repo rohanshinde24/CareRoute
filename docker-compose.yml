@@ -10,6 +10,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    # Published on a non-default host port so PostgreSQL integration tests can run
+    # from the host venv. SQLite cannot express SELECT ... FOR UPDATE, so row-lock
+    # behavior is untestable without a real PostgreSQL connection. Local demo only.
+    ports:
+      - "55432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
   api:
