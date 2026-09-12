@@ -1,0 +1,22 @@
+Metadata-Version: 2.4
+Name: careroute-api
+Version: 0.1.0
+Requires-Python: >=3.12
+Requires-Dist: alembic<2,>=1.13
+Requires-Dist: fastapi<1,>=0.115
+Requires-Dist: httpx<1,>=0.28
+Requires-Dist: inngest<1,>=0.5
+Requires-Dist: mcp<3,>=2
+Requires-Dist: opentelemetry-api<2,>=1.29
+Requires-Dist: opentelemetry-exporter-otlp-proto-http<2,>=1.29
+Requires-Dist: opentelemetry-instrumentation-fastapi<1,>=0.50b0
+Requires-Dist: opentelemetry-instrumentation-httpx<1,>=0.50b0
+Requires-Dist: opentelemetry-instrumentation-sqlalchemy<1,>=0.50b0
+Requires-Dist: opentelemetry-sdk<2,>=1.29
+Requires-Dist: psycopg[binary]<4,>=3.2
+Requires-Dist: pydantic-settings<3,>=2.6
+Requires-Dist: sqlalchemy<3,>=2.0
+Requires-Dist: uvicorn[standard]<1,>=0.32
+Provides-Extra: test
+Requires-Dist: httpx<1,>=0.27; extra == "test"
+Requires-Dist: pytest<9,>=8.3; extra == "test"

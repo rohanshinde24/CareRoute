@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.db
+node_modules/
+.next/
+coverage/
+
+
+# Internal engineering documents stay local. Only the root README.md is published.
+*.md
+!/README.md
