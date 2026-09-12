@@ -82,6 +82,10 @@ Applications export OTLP to an OpenTelemetry Collector and know nothing about th
 
 A workflow-run UUID is carried as a separate domain correlation identifier and is deliberately **not** the OpenTelemetry trace ID.
 
+Metrics follow the same path: applications export OTLP to the Collector, which exposes a Prometheus scrape endpoint, and Grafana links a metric back to a representative trace through exemplars. Domain instruments cover deterministic validation outcomes, workflow terminal states, investigator turn counts, model latency and confidence, gateway retries, and booking results, with alert rules for the fail-closed rate, retry exhaustion, and any duplicate booking.
+
+Metric labels pass through their own allowlist, because on the metrics side privacy and cardinality are the same constraint: an identifier used as a label value is both a data leak and an unbounded time series.
+
 ## Quickstart
 
 Requires Docker and Docker Compose. For live model inference, also [Ollama](https://ollama.com).
@@ -99,6 +103,7 @@ docker compose exec api python -m app.seed
 | Provider service docs | http://localhost:8010/docs |
 | Inngest dev server | http://localhost:8288 |
 | Grafana | http://localhost:3002 |
+| Prometheus | http://localhost:9090 |
 
 The system runs in `deterministic` mode by default and needs no network or API key. To use a local model:
 
@@ -129,6 +134,20 @@ The benchmark is a deterministic 19-case suite with hidden ground truth and **no
 
 Evaluation fixtures are tagged and server-side isolated: ordinary requests cannot opt into them, and they are excluded from product lists and normal candidate discovery.
 
+### Concurrency tests require PostgreSQL
+
+Most of the suite runs on SQLite and needs no network. The booking concurrency tests cannot: SQLite has no `SELECT ... FOR UPDATE`, so the row-locking that makes booking effectively-once is impossible to exercise there. Those tests run against real PostgreSQL and **skip silently when none is reachable** — a green run with skips has not tested the locking.
+
+With the stack up, PostgreSQL is published on `localhost:55432` and they run as part of the normal suite:
+
+```bash
+cd backend && .venv/bin/python -m pytest tests/test_booking_concurrency.py -q
+```
+
+Point them elsewhere with `CAREROUTE_TEST_DATABASE_URL`. Expect 5 skips rather than 5 passes if the database is unreachable.
+
+These tests race several confirmations at a single appointment slot and assert that exactly one appointment results. One of them documents a deliberate property of the current design: slot *selection* is not a reservation, so several referrals may hold the same selection and booking is the arbiter.
+
 ## API surface
 
 Referrals (`GET`/`POST /api/referrals`, detail, `POST .../process`, `POST .../process/durable`), commands (`documents`, `slot-selection`, `confirmation`, `cancel`), reads (`patients`, `patients/{id}/fhir`, `providers`, `slots`, `appointments`), and workflow inspection (`workflows/{id}`, `workflows/{id}/events`). Full schema at `/docs`.
@@ -157,7 +176,7 @@ Stated plainly, because a system like this is only as trustworthy as its honesty
 - Booking's guarantee holds because referral, slot, and appointment records share one transaction. It is not a distributed guarantee and is not claimed as one.
 - Provider matching uses case-insensitive location substring comparison — not geocoding, distance, travel time, payer network, language, or subspecialty.
 - The Inngest dev server keeps run history in memory; domain state lives in PostgreSQL.
-- No end-user authentication or authorization, binary document storage, payer integration, metrics backend, centralized logging, alerting, or hosted deployment.
+- No end-user authentication or authorization, binary document storage, payer integration, centralized logging, or hosted deployment.
 - Local Grafana runs with anonymous access for demo convenience. **Do not expose it outside localhost as configured.**
 - Model latency depends entirely on local hardware. Unit tests use SQLite and do not replace PostgreSQL integration coverage.
 
