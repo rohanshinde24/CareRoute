@@ -133,6 +133,12 @@ async def process_referral(referral_id: uuid.UUID, db: Session = Depends(get_db)
         return await ReferralCoordinator(db, model).process(referral_id)
     except ProviderGatewayTransientError as exc:
         raise HTTPException(status_code=503, detail="Provider service is temporarily unavailable; retry this referral") from exc
+    except InvalidTransition as exc:
+        # Re-processing a referral that has already advanced is a client error, not
+        # a server fault. The command endpoints already answer 409 for this; leaving
+        # it as an unhandled 500 here also polluted the service error rate and would
+        # trip the gateway alert for something no operator needs to see.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 @app.post("/api/referrals/{referral_id}/process/durable", response_model=DurableProcessRead, status_code=status.HTTP_202_ACCEPTED)
 async def process_referral_durably(referral_id: uuid.UUID, payload: DurableProcessCreate, db: Session = Depends(get_db)):

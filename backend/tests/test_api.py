@@ -109,3 +109,17 @@ def test_p2_selection_confirmation_api_is_duplicate_safe(client, db, monkeypatch
     assert first.status_code == 200 and first.json()["duplicate"] is False
     assert repeated.status_code == 200 and repeated.json()["duplicate"] is True
     assert confirmation.status_code == 202
+
+
+def test_reprocessing_an_advanced_referral_is_a_conflict_not_a_server_error(client, db):
+    person = patient(db)
+    referral = Referral(patient_id=person.id, requested_specialty="Cardiology", reason="Already advanced", state=ReferralState.CONFIRMED, is_synthetic=True)
+    db.add(referral)
+    db.commit()
+
+    response = client.post(f"/api/referrals/{referral.id}/process")
+
+    # A 500 here would count a client mistake against the service error rate and
+    # trip the P4C alerting for something no operator needs to act on.
+    assert response.status_code == 409
+    assert "CONFIRMED" in response.json()["detail"]

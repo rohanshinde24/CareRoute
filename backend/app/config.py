@@ -3,6 +3,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://careroute:careroute@localhost:5432/careroute"
+    # Explicit rather than inherited from SQLAlchemy. Past pool_size + max_overflow
+    # concurrent database-touching requests, work queues on checkout instead of
+    # failing, so the ceiling shows up as latency with idle CPU and is invisible
+    # unless it is written down.
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_timeout: float = 30.0
+    db_pool_recycle_seconds: int = 1800
     cors_origins: str = "http://localhost:3000"
     model_provider: str = "deterministic"
     gemini_api_key: str | None = None
@@ -25,6 +33,11 @@ class Settings(BaseSettings):
     inngest_event_key: str | None = None
     inngest_signing_key: str | None = None
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @property
+    def max_pooled_connections(self) -> int:
+        """Ceiling on concurrent database work for one process."""
+        return self.db_pool_size + self.db_max_overflow
 
     @property
     def allowed_origins(self) -> list[str]:
