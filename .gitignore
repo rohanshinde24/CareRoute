@@ -10,5 +10,9 @@ coverage/
 
 
 # Internal engineering documents stay local. Only the root README.md is published.
+# Their version history lives in .docs-history.git, a separate repository with no
+# remote; see scripts/docs-snapshot.sh. Keeping them untracked here is what makes
+# an accidental push of them impossible.
 *.md
 !/README.md
+.docs-history.git/
