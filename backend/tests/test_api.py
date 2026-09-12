@@ -41,7 +41,7 @@ def test_lists_free_slots_with_provider(client, db):
     db.commit()
     response = client.get("/api/slots?specialty=cardio")
     assert response.status_code == 200
-    assert response.json()[0]["provider"]["name"] == "Synthetic Provider"
+    assert response.json()["items"][0]["provider"]["name"] == "Synthetic Provider"
 
 def test_product_lists_hide_evaluation_fixtures(client, db):
     person = patient(db)
@@ -56,9 +56,9 @@ def test_product_lists_hide_evaluation_fixtures(client, db):
     db.add(AppointmentSlot(schedule_id=schedule.id, start_at=start, end_at=start + timedelta(minutes=30)))
     db.commit()
 
-    assert all(item["id"] != str(referral.id) for item in client.get("/api/referrals").json())
+    assert all(item["id"] != str(referral.id) for item in client.get("/api/referrals").json()["items"])
     assert client.get("/api/providers?specialty=Evaluation-only").json() == []
-    assert client.get("/api/slots?specialty=Evaluation-only").json() == []
+    assert client.get("/api/slots?specialty=Evaluation-only").json()["items"] == []
 
 def test_process_endpoint_persists_trace(client, db):
     person = patient(db)
