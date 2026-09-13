@@ -109,6 +109,11 @@ def test_alert_rules_cover_safety_and_distribution_signals():
     alerts = {rule["alert"] for group in groups for rule in group["rules"]}
 
     assert {
+        "CareRouteOutboxNotDraining",
+        "CareRouteRelayCannotReachBroker",
+        "CareRouteConsumerLag",
+        "CareRouteConsumerStalled",
+        "CareRouteReconcilerRepairingSteadily",
         "CareRouteFailClosedRateHigh",
         "CareRouteDuplicateBooking",
         "CareRouteProviderGatewayErrors",
@@ -121,3 +126,27 @@ def test_alert_rules_cover_safety_and_distribution_signals():
 def test_trace_evidence_outlives_a_phase():
     # P4B.1 evidence expired under the original 24h retention.
     assert _yaml("observability/tempo.yml")["compactor"]["compaction"]["block_retention"] == "336h"
+
+
+def test_delivery_alerts_watch_age_and_lag_not_just_depth():
+    """Depth alone is the wrong signal.
+
+    A large backlog draining steadily is healthy; a single event stuck for
+    minutes means the relay is dead. The age and stalled-consumer rules are the
+    ones that distinguish those, so their absence would leave a silent failure.
+    """
+    groups = {group["name"]: group for group in _yaml("observability/rules.yml")["groups"]}
+    delivery = groups["careroute-delivery"]
+    rules = {rule["alert"]: rule for rule in delivery["rules"]}
+
+    assert "careroute_outbox_age_seconds" in rules["CareRouteOutboxNotDraining"]["expr"]
+    assert rules["CareRouteOutboxNotDraining"]["labels"]["severity"] == "critical"
+
+    # A stalled consumer must only fire when something is actually being
+    # published, or a quiet system pages someone at 3am for nothing.
+    stalled = rules["CareRouteConsumerStalled"]["expr"]
+    assert "careroute_relay_dispatched_total" in stalled and "> 0" in stalled
+    assert rules["CareRouteConsumerStalled"]["labels"]["severity"] == "critical"
+
+    # The reconciler repairing at all means an event was lost somewhere.
+    assert "reconciled" in rules["CareRouteReconcilerRepairingSteadily"]["expr"]

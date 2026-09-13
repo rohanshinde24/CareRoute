@@ -64,3 +64,70 @@ groups:
           severity: warning
         annotations:
           summary: "Workflows are escalating to human review at an elevated rate"
+
+  - name: careroute-delivery
+    interval: 30s
+    rules:
+      # Age, not depth. A large backlog draining steadily is healthy; a single
+      # row stuck for minutes means the relay is not running at all.
+      - alert: CareRouteOutboxNotDraining
+        expr: |
+          max(careroute_outbox_age_seconds_sum / clamp_min(careroute_outbox_age_seconds_count, 1)) by (domain) > 120
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox events in {{ $labels.domain }} are older than 2 minutes; the relay is likely down"
+
+      # Depth is still worth watching, but only when it grows without draining.
+      - alert: CareRouteOutboxBacklogGrowing
+        expr: |
+          min_over_time(
+            (max(careroute_outbox_depth_sum / clamp_min(careroute_outbox_depth_count, 1)) by (domain))[15m:]
+          ) > 50
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox backlog in {{ $labels.domain }} has stayed above 50 for 15m"
+
+      - alert: CareRouteRelayCannotReachBroker
+        expr: increase(careroute_relay_dispatched_total{outcome="broker_unavailable"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Relay cannot reach Redis; events are accumulating undispatched"
+
+      # Consumer lag: events are being published but nothing is handling them.
+      # Compared as rates so a quiet system does not alert.
+      - alert: CareRouteConsumerLag
+        expr: |
+          sum(rate(careroute_relay_dispatched_total{outcome="dispatched"}[10m]))
+            - sum(rate(careroute_events_consumed_total[10m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+          
+        annotations:
+          summary: "Events are being published faster than they are consumed"
+
+      - alert: CareRouteConsumerStalled
+        expr: |
+          sum(rate(careroute_relay_dispatched_total{outcome="dispatched"}[10m])) > 0
+            and sum(rate(careroute_events_consumed_total[10m])) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Events are being published and nothing is consuming them"
+
+      # The reconciler repairing anything means an event was lost. Occasional is
+      # the design working; sustained means delivery is broken underneath it.
+      - alert: CareRouteReconcilerRepairingSteadily
+        expr: increase(careroute_reconciliations_total{outcome="reconciled"}[30m]) > 5
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reconciler is repairing bookings regularly; domain events are being lost"
