@@ -40,6 +40,7 @@ services:
       DATABASE_URL: postgresql+psycopg://careroute:careroute@db:5432/careroute
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}
       MODEL_PROVIDER: ${MODEL_PROVIDER:-deterministic}
+      AGENT_RUNTIME: ${AGENT_RUNTIME:-legacy}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma3:4b}
       MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-90}

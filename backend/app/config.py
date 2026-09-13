@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     db_pool_recycle_seconds: int = 1800
     cors_origins: str = "http://localhost:3000"
     model_provider: str = "deterministic"
+    # Orchestration for the provider-ranking investigation: "legacy" is the
+    # handwritten loop, "langgraph" the state graph. Both share one policy.
+    agent_runtime: str = "legacy"
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.8-flash"
     ollama_base_url: str = "http://localhost:11434"

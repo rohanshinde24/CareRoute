@@ -124,6 +124,31 @@ Two properties are worth reading off the diagram. `BOOKING` is the sole route in
 
 This diagram is verified by `tests/test_readme_diagram.py`, which parses it and compares it against the transition table in the code. If they ever disagree, the test fails rather than the README quietly misleading a reader.
 
+### The provider investigation, as a graph
+
+The provider-ranking investigator ships in two interchangeable orchestrations, selected by `AGENT_RUNTIME`: `legacy`, a handwritten loop, and `langgraph`, a bounded state graph. They share one deterministic policy — the graph imports the loop's available-action and validation functions rather than restating them, so the two cannot drift apart.
+
+```mermaid
+flowchart LR
+    S([start]) --> D[decide<br/><i>model proposes one action</i>]
+    D --> V{validate<br/><i>deterministic policy</i>}
+    V -->|rejected| X([fail closed<br/>NEEDS_HUMAN_REVIEW])
+    V -->|get slots,<br/>under tool ceiling| O[observe<br/><i>gateway call</i>]
+    O --> D
+    V -->|propose / escalate /<br/>turn limit| F([finish])
+```
+
+The graph owns which node runs next and the turn and tool-call ceilings. It does not own the candidate set, slot selection, referral state, booking, or the right to skip validation — a rejected proposal ends the investigation rather than being retried.
+
+**Measured, not assumed.** Both runtimes were run against the same 19-case benchmark and the same ranking scenario:
+
+| | Benchmark | Turns | Tool calls | Outcome | p50 latency |
+|---|---|---|---|---|---|
+| `legacy` | 19/19 | 2 | 1 | `provider_proposed` | 0.077 s |
+| `langgraph` | 19/19 | 2 | 1 | `provider_proposed` | 0.088 s |
+
+Identical decisions and identical budgets; the graph costs roughly 11 ms of orchestration overhead. `legacy` remains the default. The graph is here because an explicit state machine is easier to reason about and test than a loop — not because it made the agent smarter, which it did not.
+
 ### Booking across the domain boundary
 
 Booking is the one operation that spans both services. The referral domain decides *whether* to ask; the provider domain decides *what happens*.

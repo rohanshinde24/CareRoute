@@ -12,6 +12,22 @@ from .provider_database import provider_session
 from .provider_gateway import ProviderGateway, ProviderGatewayProtocolError, configured_provider_gateway
 
 
+def _provider_investigator(db, model, run, gateway, fault_injector):
+    """Select the investigation runtime.
+
+    Both implementations share the same deterministic policy; only the control
+    flow differs. The flag exists so the two can be measured against each other
+    on the same benchmark rather than swapped on faith.
+    """
+    from .config import settings
+
+    if settings.agent_runtime == "langgraph":
+        from .provider_graph import ProviderGraphInvestigator
+
+        return ProviderGraphInvestigator(db, model, run, gateway, fault_injector)
+    return ProviderInvestigator(db, model, run, gateway, fault_injector)
+
+
 def _default_gateway() -> ProviderGateway:
     from .config import settings
 
@@ -159,7 +175,7 @@ class ReferralCoordinator:
         ranking_note = ""
         if referral.location_preference and len(ordered_providers) >= 2:
             try:
-                proposed_provider_id = await ProviderInvestigator(self.db, self.model, run, self.provider_gateway, self.fault_injector).investigate(referral, ordered_providers)
+                proposed_provider_id = await _provider_investigator(self.db, self.model, run, self.provider_gateway, self.fault_injector).investigate(referral, ordered_providers)
             except (ModelResponseError, ValidationError, InvestigationPolicyError, ProviderGatewayProtocolError) as exc:
                 return self._finish(run, referral, ReferralState.NEEDS_HUMAN_REVIEW, NextAction.ESCALATE_HUMAN, f"Provider investigation violated ranking policy: {exc}")
             if proposed_provider_id is not None:
