@@ -71,9 +71,89 @@ The referral API owns referral coordination, the workflow state machine, confirm
 
 ### Workflow states
 
-`RECEIVED`, `PARSING`, `VALIDATING`, `WAITING_FOR_DOCUMENTS`, `CHECKING_COVERAGE`, `MATCHING_PROVIDER`, `WAITING_FOR_SLOT_SELECTION`, `BOOKING`, `CONFIRMED`, `NEEDS_HUMAN_REVIEW`, `PROVIDER_UNAVAILABLE`, `COVERAGE_UNVERIFIED`, `BOOKING_FAILED`, `CANCELLED`.
+Every transition below is enforced by an explicit allow-list in `workflow.py`. A move that is not drawn here raises `InvalidTransition` and is rejected — including any a model might propose. Ambiguity routes to `NEEDS_HUMAN_REVIEW` rather than to a guess.
 
-Transitions are deterministic. Ambiguity routes to `NEEDS_HUMAN_REVIEW` rather than to a guess.
+```mermaid
+stateDiagram-v2
+    [*] --> RECEIVED
+
+    RECEIVED --> PARSING
+    PARSING --> VALIDATING
+    PARSING --> NEEDS_HUMAN_REVIEW
+
+    VALIDATING --> WAITING_FOR_DOCUMENTS
+    VALIDATING --> CHECKING_COVERAGE
+    VALIDATING --> NEEDS_HUMAN_REVIEW
+
+    CHECKING_COVERAGE --> MATCHING_PROVIDER
+    CHECKING_COVERAGE --> COVERAGE_UNVERIFIED
+
+    MATCHING_PROVIDER --> WAITING_FOR_SLOT_SELECTION
+    MATCHING_PROVIDER --> PROVIDER_UNAVAILABLE
+    MATCHING_PROVIDER --> NEEDS_HUMAN_REVIEW
+
+    WAITING_FOR_SLOT_SELECTION --> BOOKING
+    BOOKING --> CONFIRMED
+    BOOKING --> BOOKING_FAILED
+    BOOKING_FAILED --> WAITING_FOR_SLOT_SELECTION
+
+    VALIDATING --> PARSING
+    CHECKING_COVERAGE --> PARSING
+    MATCHING_PROVIDER --> PARSING
+    WAITING_FOR_DOCUMENTS --> PARSING
+    COVERAGE_UNVERIFIED --> PARSING
+    PROVIDER_UNAVAILABLE --> PARSING
+    NEEDS_HUMAN_REVIEW --> PARSING
+
+    CONFIRMED --> [*]
+    CANCELLED --> [*]
+
+    note right of CANCELLED
+        Reachable from every
+        non-terminal state
+    end note
+
+    note right of BOOKING
+        The only path to CONFIRMED.
+        Requires an explicit human
+        confirmation command first.
+    end note
+```
+
+Two properties are worth reading off the diagram. `BOOKING` is the sole route into `CONFIRMED`, and it is gated on a recorded confirmation command. And every way of pausing or failing — waiting on documents, unverified coverage, no available provider, human review — returns to `PARSING` rather than skipping ahead, so a resumed referral is re-evaluated from the start instead of continuing on stale conclusions.
+
+This diagram is verified by `tests/test_readme_diagram.py`, which parses it and compares it against the transition table in the code. If they ever disagree, the test fails rather than the README quietly misleading a reader.
+
+### Booking across the domain boundary
+
+Booking is the one operation that spans both services. The referral domain decides *whether* to ask; the provider domain decides *what happens*.
+
+```mermaid
+sequenceDiagram
+    participant U as Person
+    participant R as Referral API
+    participant RD as Referral DB
+    participant P as Provider service
+    participant PD as Provider DB
+
+    U->>R: confirm slot
+    R->>RD: record confirmation command
+    R->>RD: state -> BOOKING
+
+    R->>P: POST /internal/bookings (idempotency key)
+    Note over P,PD: one transaction
+    P->>PD: lock slot FOR UPDATE
+    P->>PD: check owning provider specialty
+    P->>PD: slot -> BUSY, insert appointment
+    P->>PD: record the decision
+    P-->>R: outcome + appointment id
+
+    R->>RD: state -> CONFIRMED
+    R-->>U: booked
+
+    Note over R,P: A lost reply is recoverable: repeating<br/>the request with the same key returns<br/>the original decision, never a second booking.
+```
+
 
 ## Reliability
 
