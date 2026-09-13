@@ -35,31 +35,86 @@ This is auditable rather than asserted. Every model turn emits an `agent.turn` s
 
 ## Architecture
 
-```text
-Browser / Next.js
-       |
-       v
-Referral API (FastAPI) ----------------> Referral PostgreSQL
-       |                                 (referrals, patients, coverage,
-       |                                  documents, workflow state)
-       +---- local Ollama or Gemini (bounded proposals only)
-       |
-       | typed HTTP gateway: timeouts, bounded retry with jitter,
-       | idempotency keys, response validation, correlation IDs,
-       | trace propagation
-       v
-Provider service (FastAPI) ------------> Provider PostgreSQL
-                                         (providers, schedules, slots,
-                                          appointments, booking attempts)
+```mermaid
+flowchart TB
+    subgraph clients[Clients]
+        WEB[Next.js dashboard]
+        MCPC[MCP client<br/>9 administrative tools]
+    end
 
-Referral API + Provider service
-       |
-       | OTLP/HTTP + W3C Trace Context
-       v
-OpenTelemetry Collector --> Grafana Tempo --> Grafana
+    subgraph referral[Referral domain]
+        API[Referral API<br/>FastAPI]
+        COORD[Coordinator<br/>state machine, confirmation gating]
+        INV{{Bounded investigators<br/>specialty · document · provider}}
+        RT[["AGENT_RUNTIME<br/>legacy loop or LangGraph"]]
+        POL[/Deterministic policy<br/>validate every proposal/]
+        CMD[Idempotent commands<br/>documents · selection · confirm · cancel]
+        FHIR[FHIR translation]
+    end
 
-Referral API <--> Inngest (durable workflow steps, waits, retries)
+    subgraph models[Model adapters]
+        DET[deterministic<br/>default, zero-network]
+        OLL[Ollama]
+        GEM[Gemini]
+    end
+
+    subgraph provider[Provider domain]
+        PSVC[Provider service<br/>FastAPI]
+        BOOK[[Booking<br/>lock · verify · mark busy · insert<br/>one transaction]]
+    end
+
+    RDB[(Referral PostgreSQL<br/>referrals, patients, coverage,<br/>documents, workflow state)]
+    PDB[(Provider PostgreSQL<br/>providers, schedules, slots,<br/>appointments, booking attempts)]
+    INN[Inngest<br/>durable steps, waits, retries]
+
+    subgraph obs[Observability]
+        COL[OpenTelemetry Collector]
+        TEMPO[(Tempo<br/>traces, 14d)]
+        PROM[(Prometheus<br/>metrics, 15d)]
+        GRAF[Grafana<br/>dashboards · alert rules]
+    end
+
+    subgraph harness[Verification harnesses]
+        BENCH[19-case benchmark<br/>no LLM judge]
+        CMP[Runtime comparison]
+        K6[k6 load profile]
+    end
+
+    WEB --> API
+    MCPC --> API
+    API --> COORD
+    COORD --> CMD
+    COORD --> FHIR
+    COORD --> INV
+    INV -.selected by.-> RT
+    INV --> POL
+    POL -->|rejected| HR([NEEDS_HUMAN_REVIEW])
+    INV --> DET
+    INV --> OLL
+    INV --> GEM
+    API <--> INN
+    API --> RDB
+    CMD --> RDB
+
+    COORD -->|typed HTTP gateway<br/>timeouts · jittered retry · idempotency keys<br/>correlation IDs · trace propagation| PSVC
+    PSVC --> BOOK
+    BOOK --> PDB
+    PSVC --> PDB
+
+    API -.OTLP.-> COL
+    PSVC -.OTLP.-> COL
+    COL --> TEMPO
+    COL --> PROM
+    TEMPO --> GRAF
+    PROM --> GRAF
+    PROM -.exemplars.-> TEMPO
+
+    BENCH --> API
+    CMP --> API
+    K6 --> API
 ```
+
+Every arrow into the provider domain is an HTTP request, never a query. The dotted line from the investigators to `AGENT_RUNTIME` is the orchestration flag; both runtimes route through the same deterministic policy box, which is the only thing that can approve a model's proposal.
 
 **The two services own separate databases.** The provider domain owns providers, schedules, slots, appointments, and booking records; the referral domain owns everything else. Neither reads the other's tables. References that cross the boundary are validated UUIDs with no foreign key, because a foreign key cannot be enforced across databases.
 
@@ -139,6 +194,19 @@ flowchart LR
 ```
 
 The graph owns which node runs next and the turn and tool-call ceilings. It does not own the candidate set, slot selection, referral state, booking, or the right to skip validation — a rejected proposal ends the investigation rather than being retried.
+
+**What the policy checks, and why it can.** A proposal is refused until every matching candidate's availability has been observed, and the accepted answer is the earliest observed free slot, ties broken by ID. That criterion was chosen because it is objective and totally ordered, so the validator does not assess whether a proposal is *reasonable* — it recomputes the answer and checks equality. A validator that had to judge quality would be a second model with the same failure modes.
+
+The honest consequence: **the model cannot improve on the deterministic answer here — it can only match it or fail.** This slice is a testbed for the propose-and-verify boundary, not a place where a language model adds decision value.
+
+**Measured against real models.** The deepest legal case — three candidates, spending the full 4-turn and 3-tool budget — was run 6 times per runtime against two local models:
+
+| Model | Completed the ranking | Notes |
+|---|---|---|
+| `gemma3:4b` | **0 / 12** | fails the final judgment after all three lookups |
+| `qwen2.5:7b` | **1 / 12** | ~3× slower, no more reliable |
+
+All 23 failures were **caught**: the policy recomputed the correct provider, saw a mismatch, and routed to `NEEDS_HUMAN_REVIEW`. No incorrect proposal reached a patient-visible outcome. Both models reliably perform the three lookups and then fail the ranking itself, so this is a documented capability boundary rather than a flaky run.
 
 **Measured, not assumed.** Both runtimes pass the 19-case benchmark. Beyond that, `careroute-compare-runtimes` drives both across the full legal range of the ranking path — the number of candidates matching the location preference, which is what actually determines how many turns and tool calls an investigation spends. Fifteen repetitions per cell:
 
