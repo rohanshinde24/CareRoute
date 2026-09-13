@@ -146,3 +146,25 @@ class ReferralOutbox(OutboxMixin, Base):
     """Referral-domain outbox. Written in the same transaction as the state change."""
 
     __tablename__ = "referral_outbox"
+
+
+class ConsumedEvent(Base):
+    """Dedup record for domain events this service has already handled.
+
+    Delivery is at-least-once, so the same event will arrive again after a relay
+    crash or a redelivered stream entry. Consumers are required to absorb that,
+    and this table is how: the handler and this row commit together, so an event
+    is marked consumed only if its effect landed.
+
+    Separate from `processed_events`, which deduplicates inbound *commands* from
+    users. Different producers, different lifetimes, and collapsing them would
+    let a command id collide with an event id.
+    """
+
+    __tablename__ = "consumed_events"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(unique=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(80))
+    consumer: Mapped[str] = mapped_column(String(60))
+    outcome: Mapped[str] = mapped_column(String(40))
+    consumed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

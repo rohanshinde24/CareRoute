@@ -22,6 +22,7 @@ SAFE_LABEL_KEYS = frozenset(
         "outcome",
         "result",
         "domain",
+        "event_type",
         "service",
         "specialty",
         "terminal_state",
@@ -153,6 +154,14 @@ class _Instruments:
             unit="s",
             description="Age of the oldest undispatched outbox row. A single stuck row matters more than a large moving backlog.",
         )
+        self.events_consumed = meter.create_counter(
+            "careroute.events.consumed",
+            description="Domain events handled by a consumer, by outcome.",
+        )
+        self.reconciliations = meter.create_counter(
+            "careroute.reconciliations",
+            description="Reconciler outcomes. A steady non-zero 'reconciled' rate means events are being lost.",
+        )
         self.booking_attempts = meter.create_counter(
             "careroute.booking.attempts",
             description="Booking attempts by result, including idempotent duplicate suppression.",
@@ -218,3 +227,11 @@ def record_outbox_backlog(domain: str, depth: int, age_seconds: float | None) ->
     _record("outbox_depth", depth, {"domain": domain})
     if age_seconds is not None:
         _record("outbox_age", age_seconds, {"domain": domain})
+
+
+def record_event_consumed(event_type: str, outcome: str) -> None:
+    _add("events_consumed", 1, {"event_type": event_type, "outcome": outcome})
+
+
+def record_reconciliation(outcome: str) -> None:
+    _add("reconciliations", 1, {"outcome": outcome})

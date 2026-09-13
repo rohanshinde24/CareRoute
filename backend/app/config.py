@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     # unless it is written down.
     redis_url: str = "redis://localhost:6379/0"
     relay_interval_seconds: float = 1.0
+    reconciler_interval_seconds: float = 30.0
     provider_database_url: str = "postgresql+psycopg://careroute:careroute@localhost:5433/careroute_provider"
     db_pool_size: int = 5
     db_max_overflow: int = 10

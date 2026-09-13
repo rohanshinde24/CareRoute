@@ -176,6 +176,40 @@ services:
       provider-db:
         condition: service_healthy
 
+  consumer:
+    build: ./backend
+    command: python -m app.consumer
+    environment:
+      DATABASE_URL: postgresql+psycopg://careroute:careroute@db:5432/careroute
+      REDIS_URL: redis://redis:6379/0
+      TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://otel-collector:4318/v1/traces}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: ${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:-http://otel-collector:4318/v1/metrics}
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+
+  reconciler:
+    build: ./backend
+    command: python -m app.reconciler
+    environment:
+      DATABASE_URL: postgresql+psycopg://careroute:careroute@db:5432/careroute
+      PROVIDER_SERVICE_URL: http://provider-service:8010
+      PROVIDER_INTERNAL_TOKEN: ${PROVIDER_INTERNAL_TOKEN:-careroute-local-synthetic}
+      RECONCILER_INTERVAL_SECONDS: ${RECONCILER_INTERVAL_SECONDS:-30}
+      TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://otel-collector:4318/v1/traces}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: ${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:-http://otel-collector:4318/v1/metrics}
+    depends_on:
+      db:
+        condition: service_healthy
+      provider-service:
+        condition: service_healthy
+
   web:
     build: ./frontend
     environment:
