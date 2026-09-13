@@ -133,3 +133,20 @@ def test_the_comparison_dataset_covers_the_whole_legal_ranking_range():
     # or the investigation is skipped and the comparison measures nothing.
     for name, options in SCENARIOS.items():
         assert options["matching"] + options["non_matching"] >= 2, f"{name} cannot open an investigation"
+
+
+def test_the_comparison_harness_honours_the_configured_model():
+    """The harness once hardcoded the deterministic model.
+
+    That made every run report deterministic timings regardless of
+    MODEL_PROVIDER, so an Ollama comparison would have looked ~100x faster than
+    it is and the numbers would have been quietly wrong. The magnitude gave it
+    away; nothing in the code did.
+    """
+    import inspect
+
+    from app import runtime_comparison
+
+    source = inspect.getsource(runtime_comparison)
+    assert "configured_model()" in source, "the harness must resolve the model from settings"
+    assert "DeterministicReferralModel()" not in source, "the harness must not pin a model implementation"
