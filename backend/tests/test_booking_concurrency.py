@@ -44,7 +44,13 @@ def factory():
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
     except Exception as exc:  # pragma: no cover - environment dependent
-        pytest.skip(f"provider PostgreSQL not reachable at {PROVIDER_DATABASE_URL}: {exc}")
+        # Skipping locally is a convenience. Skipping in CI would mean a green
+        # badge that never exercised the booking guarantee, so there the absence
+        # of a database is a failure rather than a shrug.
+        message = f"provider PostgreSQL not reachable at {PROVIDER_DATABASE_URL}: {exc}"
+        if os.environ.get("CAREROUTE_REQUIRE_POSTGRES"):
+            pytest.fail(message)
+        pytest.skip(message)
     return sessionmaker(bind=engine, expire_on_commit=False)
 
 

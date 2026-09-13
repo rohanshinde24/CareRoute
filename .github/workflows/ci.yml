@@ -2,16 +2,76 @@ name: CI
 on:
   push:
   pull_request:
+
 jobs:
   backend:
     runs-on: ubuntu-latest
+    # Two databases, because the domains own separate storage. Without the
+    # provider database the booking concurrency tests skip, and a green badge
+    # would mean "everything except the guarantee this project is built on".
+    services:
+      referral-db:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: careroute
+          POSTGRES_USER: careroute
+          POSTGRES_PASSWORD: careroute
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U careroute -d careroute"
+          --health-interval 5s --health-timeout 5s --health-retries 15
+      provider-db:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: careroute_provider
+          POSTGRES_USER: careroute
+          POSTGRES_PASSWORD: careroute
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U careroute -d careroute_provider"
+          --health-interval 5s --health-timeout 5s --health-retries 15
+    env:
+      DATABASE_URL: postgresql+psycopg://careroute:careroute@localhost:5432/careroute
+      PROVIDER_DATABASE_URL: postgresql+psycopg://careroute:careroute@localhost:5433/careroute_provider
+      CAREROUTE_TEST_PROVIDER_DATABASE_URL: postgresql+psycopg://careroute:careroute@localhost:5433/careroute_provider
+      # Turns "database unreachable" from a skip into a failure, so the suite
+      # cannot pass by quietly not running.
+      CAREROUTE_REQUIRE_POSTGRES: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: pip install -e './backend[test]'
-      - run: pytest
+
+      - name: Apply referral migrations
+        run: alembic upgrade head
         working-directory: backend
+      - name: Apply provider migrations
+        run: alembic -c alembic_provider.ini upgrade head
+        working-directory: backend
+
+      - name: Both migration chains are at head
+        working-directory: backend
+        run: |
+          alembic current | tee /tmp/referral_head
+          alembic -c alembic_provider.ini current | tee /tmp/provider_head
+          grep -q '(head)' /tmp/referral_head
+          grep -q '(head)' /tmp/provider_head
+
+      - name: Tests
+        run: pytest -q -rs
+        working-directory: backend
+
+      - name: No test may be skipped in CI
+        working-directory: backend
+        run: |
+          pytest -q --no-header -rs 2>&1 | tee /tmp/out
+          if grep -qE '[0-9]+ skipped' /tmp/out; then
+            echo "::error::tests were skipped in CI; a skipped guarantee is an unverified one"
+            grep -E '^SKIPPED' /tmp/out || true
+            exit 1
+          fi
+
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -19,6 +79,8 @@ jobs:
       - uses: actions/setup-node@v4
         with: {node-version: 22, cache: npm, cache-dependency-path: frontend/package-lock.json}
       - run: npm ci
+        working-directory: frontend
+      - run: npm run lint
         working-directory: frontend
       - run: npm run build
         working-directory: frontend
