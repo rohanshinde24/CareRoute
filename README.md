@@ -41,11 +41,14 @@ This is auditable rather than asserted. Every model turn emits an `agent.turn` s
 flowchart LR
     WEB[Next.js<br/>dashboard] --> API
     MCP[MCP tools] --> API[Referral API]
-    API --> RDB[(Referral DB)]
+    API --> RDB[(Referral DB<br/>+ outbox)]
     API <--> INN[Inngest<br/>durable steps]
     API -->|typed HTTP gateway| PS[Provider service]
-    PS --> PDB[(Provider DB)]
-    PS --> BK[[Booking<br/>one transaction]]
+    PS --> BK[[Booking + event<br/>one transaction]]
+    BK --> PDB[(Provider DB<br/>+ outbox)]
+    RDB -.-> RLY[Relay]
+    PDB -.-> RLY
+    RLY --> RS[(Redis Streams)]
 ```
 
 **Agent path.** A model may propose; only deterministic policy may accept.
@@ -79,6 +82,10 @@ Every arrow into the provider domain is an HTTP request, never a query. The dott
 The referral API reaches the provider service only through a typed asynchronous gateway that separates transient failures (timeouts, connection errors, 429, selected 5xx) from permanent protocol failures, and fails closed on malformed payloads and correlation mismatches. Retries use exponential backoff with full jitter.
 
 **Booking executes inside the provider service**, where the slot and the appointment live, so the lock, the slot state change, and the appointment write remain a single transaction. It is requested with a caller-supplied idempotency key, and the provider side records its decision — refusals as well as successes — so a caller that loses the response can repeat the request and learn the original outcome rather than act twice.
+
+**Domain events go through a transactional outbox.** Each database has its own outbox table, written in the *same transaction* as the state change it describes — a commit followed by a separate publish is not atomic, and would either announce something that rolled back or silently lose something that happened. A relay claims rows with `SELECT ... FOR UPDATE SKIP LOCKED`, publishes to Redis Streams, then marks them dispatched. It publishes *before* marking on purpose: a crash between the two produces a duplicate, which consumers absorb, rather than a silence, which nothing downstream can repair.
+
+The relay runs outside the request path, so a broker outage delays delivery instead of failing a user-facing operation. Redis uses AOF with `appendfsync everysec`; the resulting one-second window of acknowledged-but-unwritten events is survivable because the outbox holds the authoritative record.
 
 The referral API owns referral coordination, the workflow state machine, confirmation gating, model adapters, patient and coverage tools, MCP, and FHIR translation.
 
@@ -226,6 +233,7 @@ docker compose exec api python -m app.seed
 | Inngest dev server | http://localhost:8288 |
 | Grafana | http://localhost:3002 |
 | Prometheus | http://localhost:9090 |
+| Redis (domain events) | localhost:6379 |
 
 The system runs in `deterministic` mode by default and needs no network or API key. To use a local model:
 
@@ -296,7 +304,8 @@ Stated plainly, because a system like this is only as trustworthy as its honesty
 
 - Booking's guarantee holds because the slot and appointment share one transaction in the provider database. It is not a distributed guarantee and is not claimed as one.
 - The referral state change that follows a booking is a second transaction in the other database. The appointment is authoritative if one is interrupted, and repair is forward-only. There is no automatic reconciler yet.
-- There are no asynchronous domain events, outbox, or message broker yet.
+- The outbox and relay publish domain events, but nothing consumes them yet.
+- The API does not currently recover from saturation: under sustained overload every pooled connection ends up `idle in transaction` and the service stops serving until the process is restarted. This is a known open defect, not a tuning parameter.
 - Provider matching uses case-insensitive location substring comparison — not geocoding, distance, travel time, payer network, language, or subspecialty.
 - The Inngest dev server keeps run history in memory; domain state lives in PostgreSQL.
 - No end-user authentication or authorization, binary document storage, payer integration, centralized logging, or hosted deployment.
