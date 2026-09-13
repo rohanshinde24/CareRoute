@@ -9,6 +9,7 @@ opentelemetry-instrumentation-fastapi<1,>=0.50b0
 opentelemetry-instrumentation-httpx<1,>=0.50b0
 opentelemetry-instrumentation-sqlalchemy<1,>=0.50b0
 opentelemetry-sdk<2,>=1.29
+langgraph<0.7,>=0.6
 psycopg[binary]<4,>=3.2
 pydantic-settings<3,>=2.6
 sqlalchemy<3,>=2.0
@@ -17,3 +18,4 @@ uvicorn[standard]<1,>=0.32
 [test]
 httpx<1,>=0.27
 pytest<9,>=8.3
+pyyaml<7,>=6

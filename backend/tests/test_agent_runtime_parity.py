@@ -110,3 +110,26 @@ def test_the_graph_shares_the_loops_policy_rather_than_restating_it():
     assert ProviderGraphInvestigator._available is ProviderInvestigator._available
     assert ProviderGraphInvestigator.max_turns == ProviderInvestigator.max_turns
     assert ProviderGraphInvestigator.max_tool_calls == ProviderInvestigator.max_tool_calls
+
+
+def test_the_comparison_dataset_covers_the_whole_legal_ranking_range():
+    """Guards against the comparison silently measuring the degenerate case.
+
+    The first runtime comparison used a scenario with one matching candidate,
+    where there is nothing to rank and the investigation spends one tool call.
+    If the ceilings change, the dataset must change with them or the comparison
+    quietly stops exercising the interesting paths.
+    """
+    from app.runtime_comparison import SCENARIOS
+
+    matching = sorted(options["matching"] for options in SCENARIOS.values())
+    assert matching == [0, 1, 2, 3, 4], f"comparison dataset no longer spans the legal range: {matching}"
+
+    # 1..max_tool_calls are the ranking depths; one above it is the short-circuit.
+    assert ProviderInvestigator.max_tool_calls == 3
+    assert max(matching) == ProviderInvestigator.max_tool_calls + 1
+
+    # Every scenario must clear the coordinator's two-eligible-provider bar,
+    # or the investigation is skipped and the comparison measures nothing.
+    for name, options in SCENARIOS.items():
+        assert options["matching"] + options["non_matching"] >= 2, f"{name} cannot open an investigation"

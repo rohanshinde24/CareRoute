@@ -140,14 +140,21 @@ flowchart LR
 
 The graph owns which node runs next and the turn and tool-call ceilings. It does not own the candidate set, slot selection, referral state, booking, or the right to skip validation — a rejected proposal ends the investigation rather than being retried.
 
-**Measured, not assumed.** Both runtimes were run against the same 19-case benchmark and the same ranking scenario:
+**Measured, not assumed.** Both runtimes pass the 19-case benchmark. Beyond that, `careroute-compare-runtimes` drives both across the full legal range of the ranking path — the number of candidates matching the location preference, which is what actually determines how many turns and tool calls an investigation spends. Fifteen repetitions per cell:
 
-| | Benchmark | Turns | Tool calls | Outcome | p50 latency |
+| Scenario | Turns | Tool calls | Outcome | `legacy` p50 | `langgraph` p50 |
 |---|---|---|---|---|---|
-| `legacy` | 19/19 | 2 | 1 | `provider_proposed` | 0.077 s |
-| `langgraph` | 19/19 | 2 | 1 | `provider_proposed` | 0.088 s |
+| 1 matching candidate | 2 | 1 | `provider_proposed` | 89.9 ms | 85.8 ms |
+| 2 matching candidates | 3 | 2 | `provider_proposed` | 120.3 ms | 125.7 ms |
+| 3 matching candidates | 4 | 3 | `provider_proposed` | 149.2 ms | 156.5 ms |
+| above candidate ceiling | 0 | 0 | `candidate_limit` | 113.2 ms | 107.4 ms |
+| no location match | 0 | 0 | `no_location_match` | 59.6 ms | 60.9 ms |
 
-Identical decisions and identical budgets; the graph costs roughly 11 ms of orchestration overhead. `legacy` remains the default. The graph is here because an explicit state machine is easier to reason about and test than a loop — not because it made the agent smarter, which it did not.
+Every scenario agreed on state, outcome, turns, and tool calls. Latency differences ranged from −5.8 ms to +7.3 ms — the graph is sometimes faster and sometimes slower, so at this scale its orchestration cost is **not distinguishable from noise**; total latency is dominated by database work.
+
+Three matching candidates is the deepest legal investigation: it spends the full tool budget and hits the four-turn ceiling exactly. A larger matching set short-circuits to `candidate_limit` before any model turn.
+
+`legacy` remains the default. The graph is here because an explicit state machine is easier to reason about and test than a loop — not because it made the agent smarter, which it did not.
 
 ### Booking across the domain boundary
 

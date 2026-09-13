@@ -1,2 +1,3 @@
 [console_scripts]
 careroute-benchmark = app.evaluation:main
+careroute-compare-runtimes = app.runtime_comparison:main

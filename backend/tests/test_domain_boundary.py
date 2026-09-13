@@ -15,8 +15,10 @@ from app.provider_database import ProviderBase
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app"
 
-# Modules that legitimately own or seed provider data.
-PROVIDER_SIDE = {"provider_models.py", "provider_database.py", "provider_queries.py", "provider_service.py", "provider_contracts.py", "provider_gateway.py", "seed.py", "evaluation.py", "fhir.py", "models.py"}
+# Modules that legitimately own provider data, plus the harnesses that build
+# fixtures on both sides of the boundary. Harnesses are not the request path:
+# they are allowed two stores precisely because they must set up both.
+PROVIDER_SIDE = {"provider_models.py", "provider_database.py", "provider_queries.py", "provider_service.py", "provider_contracts.py", "provider_gateway.py", "provider_graph.py", "seed.py", "evaluation.py", "runtime_comparison.py", "fhir.py", "models.py"}
 PROVIDER_TABLES = {"providers", "provider_schedules", "appointment_slots", "appointments", "booking_attempts"}
 
 
