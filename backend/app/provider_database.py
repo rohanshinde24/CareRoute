@@ -27,6 +27,19 @@ def _engine_options() -> dict:
         "max_overflow": settings.db_max_overflow,
         "pool_timeout": settings.db_pool_timeout,
         "pool_recycle": settings.db_pool_recycle_seconds,
+        # Socket-level deadlines. Without them a thread can block forever on a
+        # connection the server has already terminated - and a permanently
+        # blocked thread is worse than a failed request, because it never comes
+        # back to serve anything else.
+        "connect_args": {
+            "options": f"-c idle_in_transaction_session_timeout={int(settings.db_idle_transaction_timeout_seconds * 1000)}",
+            "connect_timeout": 5,
+            "keepalives": 1,
+            "keepalives_idle": 10,
+            "keepalives_interval": 5,
+            "keepalives_count": 3,
+            "tcp_user_timeout": 15000,
+        },
     }
 
 
@@ -45,5 +58,12 @@ def provider_session() -> Session:
 
 
 def get_provider_db() -> Generator[Session, None, None]:
-    with ProviderSessionLocal() as session:
+    """Same deterministic cleanup as the referral session. See app/database.py."""
+    session = ProviderSessionLocal()
+    try:
         yield session
+    finally:
+        try:
+            session.rollback()
+        finally:
+            session.close()

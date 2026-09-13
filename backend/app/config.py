@@ -12,8 +12,14 @@ class Settings(BaseSettings):
     provider_database_url: str = "postgresql+psycopg://careroute:careroute@localhost:5433/careroute_provider"
     db_pool_size: int = 5
     db_max_overflow: int = 10
-    db_pool_timeout: float = 30.0
+    # Fail a checkout fast. A thread waiting 30s for a connection is a threadpool
+    # slot that cannot serve anything else, and FastAPI runs sync endpoints in a
+    # fixed-size threadpool: enough slow waits and even /health stops responding.
+    db_pool_timeout: float = 5.0
     db_pool_recycle_seconds: int = 1800
+    # PostgreSQL terminates a transaction left idle this long, so an abandoned
+    # session cannot hold a pool slot forever.
+    db_idle_transaction_timeout_seconds: float = 30.0
     cors_origins: str = "http://localhost:3000"
     model_provider: str = "deterministic"
     # Orchestration for the provider-ranking investigation: "legacy" is the

@@ -102,3 +102,31 @@ def test_the_relay_never_runs_inside_a_request():
         assert "import relay" not in source and "from .relay" not in source, (
             f"{module} reaches the relay directly; publishing belongs outside the request path"
         )
+
+
+def test_session_dependencies_release_their_connection_deterministically():
+    """A session that is only closed on the happy path is a pool leak.
+
+    Under load a cancelled request can leave the dependency generator suspended
+    at its yield. If cleanup lives in a `with` that is never reached, the
+    connection stays checked out with an open transaction; fifteen of those
+    exhaust the pool and the service stops serving without recovering.
+    """
+    for module, factory in (("database.py", "SessionLocal"), ("provider_database.py", "ProviderSessionLocal")):
+        source = (APP / module).read_text()
+        dependency = source[source.index("def get_"):]
+        assert "finally:" in dependency, f"{module} must release its session in a finally block"
+        assert "session.close()" in dependency, f"{module} must close its session explicitly"
+        assert f"with {factory}() as session:" not in dependency, (
+            f"{module} relies on a context manager that a cancelled request may never reach"
+        )
+
+
+def test_an_abandoned_transaction_cannot_hold_a_pool_slot_forever():
+    """The database-side backstop, so a leak degrades to slowness not a wedge."""
+    from app.config import Settings
+    from app.database import _engine_options
+
+    assert Settings().db_idle_transaction_timeout_seconds > 0
+    options = _engine_options()
+    assert "idle_in_transaction_session_timeout" in options["connect_args"]["options"]
