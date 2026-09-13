@@ -55,6 +55,10 @@ class Observation:
     seconds: list[float] = field(default_factory=list)
 
     @staticmethod
+    def _fit(text: str, width: int) -> str:
+        return text if len(text) < width else text[: width - 2] + ".."
+
+    @staticmethod
     def _span(values) -> str:
         present = [v for v in values if v is not None]
         if not present:
@@ -226,10 +230,13 @@ def _purge_stale_fixtures() -> None:
         print(f"  (purged {removed} stale comparison providers before starting)")
 
 
-def compare(repetitions: int) -> list[Observation]:
+def compare(repetitions: int, only: list[str] | None = None) -> list[Observation]:
     _purge_stale_fixtures()
     results: list[Observation] = []
-    for name, options in SCENARIOS.items():
+    selected = {k: v for k, v in SCENARIOS.items() if not only or k in only}
+    if not selected:
+        raise SystemExit(f"no scenarios matched {only}; known: {', '.join(SCENARIOS)}")
+    for name, options in selected.items():
         for runtime in RUNTIMES:
             settings.agent_runtime = runtime
             observation = Observation(scenario=name, runtime=runtime)
@@ -244,6 +251,14 @@ def compare(repetitions: int) -> list[Observation]:
                 observation.turns.append(payload.get("turns"))
                 observation.tool_calls.append(payload.get("tool_calls"))
                 observation.seconds.append(elapsed)
+            p50 = statistics.median(observation.seconds) * 1000
+            print(
+                f"  [done] {name:<24}{runtime:<11}"
+                f"{Observation._fit(observation.state_summary, 34):<34}"
+                f"{Observation._fit(observation.outcome_summary, 28):<28}"
+                f"turns={observation.turn_span:<6}tools={observation.tool_span:<5}p50={p50:.0f}ms",
+                flush=True,
+            )
             results.append(observation)
     return results
 
@@ -252,9 +267,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Compare provider-investigation runtimes")
     parser.add_argument("--repetitions", type=int, default=10)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--scenario", action="append", help="run only these scenarios; repeatable")
     args = parser.parse_args()
 
-    results = compare(args.repetitions)
+    results = compare(args.repetitions, args.scenario)
 
     if args.json:
         print(json.dumps([
@@ -263,14 +279,17 @@ def main() -> None:
         ], indent=2, default=str))
         return
 
-    print(f"model provider: {settings.model_provider}    repetitions: {len(results[0].seconds) if results else 0}")
+    label = settings.ollama_model if settings.model_provider == "ollama" else settings.model_provider
+    print(f"model: {label}    repetitions: {len(results[0].seconds) if results else 0}")
     print()
-    print(f"{'scenario':<24}{'runtime':<11}{'state':<28}{'outcome':<26}{'turns':>7}{'tools':>7}{'p50 ms':>10}")
+    print(f"{'scenario':<24}{'runtime':<11}{'state':<34}{'outcome':<28}{'turns':>7}{'tools':>7}{'p50 ms':>10}")
     for observation in results:
         p50 = statistics.median(observation.seconds) * 1000
         print(
-            f"{observation.scenario:<24}{observation.runtime:<11}{observation.state_summary:<28}"
-            f"{observation.outcome_summary:<26}{observation.turn_span:>7}{observation.tool_span:>7}{p50:>10.1f}"
+            f"{observation.scenario:<24}{observation.runtime:<11}"
+            f"{Observation._fit(observation.state_summary, 34):<34}"
+            f"{Observation._fit(observation.outcome_summary, 28):<28}"
+            f"{observation.turn_span:>7}{observation.tool_span:>7}{p50:>10.1f}"
         )
 
     print()
@@ -288,8 +307,10 @@ def main() -> None:
     print()
     if disagreements:
         print("  PARITY DIFFERS: " + ", ".join(disagreements))
-        print("  With a stochastic model this is expected to be noisy; compare the distributions above")
-        print("  rather than treating a single differing run as a regression.")
+        print("  With a stochastic model a differing distribution at small sample sizes is")
+        print("  expected. A handful of runs cannot separate a real difference between the")
+        print("  runtimes from model variance: read this as 'the model is inconsistent here',")
+        print("  not as 'one runtime is better'.")
     else:
         print("  parity: both runtimes produced the same distribution of states and outcomes")
 
