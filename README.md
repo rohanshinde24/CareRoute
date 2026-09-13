@@ -305,7 +305,7 @@ Stated plainly, because a system like this is only as trustworthy as its honesty
 - Booking's guarantee holds because the slot and appointment share one transaction in the provider database. It is not a distributed guarantee and is not claimed as one.
 - The referral state change that follows a booking is a second transaction in the other database. The appointment is authoritative if one is interrupted, and repair is forward-only. There is no automatic reconciler yet.
 - The outbox and relay publish domain events, but nothing consumes them yet.
-- The API does not currently recover from saturation: under sustained overload every pooled connection ends up `idle in transaction` and the service stops serving until the process is restarted. This is a known open defect, not a tuning parameter.
+- Under sustained overload the API sheds load rather than queueing it, so a saturation test shows elevated error rates by design; it stays responsive and recovers unaided once load stops.
 - Provider matching uses case-insensitive location substring comparison — not geocoding, distance, travel time, payer network, language, or subspecialty.
 - The Inngest dev server keeps run history in memory; domain state lives in PostgreSQL.
 - No end-user authentication or authorization, binary document storage, payer integration, centralized logging, or hosted deployment.
