@@ -21,13 +21,18 @@ CANCELLATION_IS_DOCUMENTED_AS_A_NOTE = True
 
 def _diagram_edges() -> set[tuple[str, str]]:
     blocks = re.findall(r"```mermaid\n(.*?)```", README.read_text(), re.DOTALL)
+    # The machine is drawn as two diagrams - happy path and recovery - because
+    # GitHub renders every mermaid block in a fixed 180px-tall frame and all
+    # fourteen states in one picture are illegible there. Verification is over
+    # the union, so splitting the drawing cannot hide a transition.
     state_blocks = [b for b in blocks if "stateDiagram" in b]
-    assert len(state_blocks) == 1, "expected exactly one state diagram in the README"
+    assert state_blocks, "expected at least one state diagram in the README"
     edges = set()
-    for source, target in re.findall(r"^\s*(\w+)\s*-->\s*(\w+)", state_blocks[0], re.MULTILINE):
-        if source == "[*]" or target == "[*]":
-            continue
-        edges.add((source, target))
+    for block in state_blocks:
+        for source, target in re.findall(r"^\s*(\w+)\s*-->\s*(\w+)", block, re.MULTILINE):
+            if source == "[*]" or target == "[*]":
+                continue
+            edges.add((source, target))
     return edges
 
 

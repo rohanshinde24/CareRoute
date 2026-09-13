@@ -35,83 +35,41 @@ This is auditable rather than asserted. Every model turn emits an `agent.turn` s
 
 ## Architecture
 
+**Services and data.** Two domains, two databases, no shared storage.
+
 ```mermaid
-flowchart TB
-    subgraph clients[Clients]
-        WEB[Next.js dashboard]
-        MCPC[MCP client<br/>9 administrative tools]
-    end
+flowchart LR
+    WEB[Next.js<br/>dashboard] --> API
+    MCP[MCP tools] --> API[Referral API]
+    API --> RDB[(Referral DB)]
+    API <--> INN[Inngest<br/>durable steps]
+    API -->|typed HTTP gateway| PS[Provider service]
+    PS --> PDB[(Provider DB)]
+    PS --> BK[[Booking<br/>one transaction]]
+```
 
-    subgraph referral[Referral domain]
-        API[Referral API<br/>FastAPI]
-        COORD[Coordinator<br/>state machine, confirmation gating]
-        INV{{Bounded investigators<br/>specialty · document · provider}}
-        RT[["AGENT_RUNTIME<br/>legacy loop or LangGraph"]]
-        POL[/Deterministic policy<br/>validate every proposal/]
-        CMD[Idempotent commands<br/>documents · selection · confirm · cancel]
-        FHIR[FHIR translation]
-    end
+**Agent path.** A model may propose; only deterministic policy may accept.
 
-    subgraph models[Model adapters]
-        DET[deterministic<br/>default, zero-network]
-        OLL[Ollama]
-        GEM[Gemini]
-    end
+```mermaid
+flowchart LR
+    CO[Coordinator] --> IN[Bounded<br/>investigator]
+    IN -.runtime flag.-> RT[[loop or<br/>LangGraph]]
+    IN --> MD[deterministic /<br/>Ollama / Gemini]
+    MD --> PO{Deterministic<br/>policy}
+    PO -->|accepted| CO
+    PO -->|rejected| HR([NEEDS_HUMAN_REVIEW])
+```
 
-    subgraph provider[Provider domain]
-        PSVC[Provider service<br/>FastAPI]
-        BOOK[[Booking<br/>lock · verify · mark busy · insert<br/>one transaction]]
-    end
+**Observability.** Applications know only the Collector.
 
-    RDB[(Referral PostgreSQL<br/>referrals, patients, coverage,<br/>documents, workflow state)]
-    PDB[(Provider PostgreSQL<br/>providers, schedules, slots,<br/>appointments, booking attempts)]
-    INN[Inngest<br/>durable steps, waits, retries]
-
-    subgraph obs[Observability]
-        COL[OpenTelemetry Collector]
-        TEMPO[(Tempo<br/>traces, 14d)]
-        PROM[(Prometheus<br/>metrics, 15d)]
-        GRAF[Grafana<br/>dashboards · alert rules]
-    end
-
-    subgraph harness[Verification harnesses]
-        BENCH[19-case benchmark<br/>no LLM judge]
-        CMP[Runtime comparison]
-        K6[k6 load profile]
-    end
-
-    WEB --> API
-    MCPC --> API
-    API --> COORD
-    COORD --> CMD
-    COORD --> FHIR
-    COORD --> INV
-    INV -.selected by.-> RT
-    INV --> POL
-    POL -->|rejected| HR([NEEDS_HUMAN_REVIEW])
-    INV --> DET
-    INV --> OLL
-    INV --> GEM
-    API <--> INN
-    API --> RDB
-    CMD --> RDB
-
-    COORD -->|typed HTTP gateway<br/>timeouts · jittered retry · idempotency keys<br/>correlation IDs · trace propagation| PSVC
-    PSVC --> BOOK
-    BOOK --> PDB
-    PSVC --> PDB
-
-    API -.OTLP.-> COL
-    PSVC -.OTLP.-> COL
-    COL --> TEMPO
-    COL --> PROM
-    TEMPO --> GRAF
-    PROM --> GRAF
-    PROM -.exemplars.-> TEMPO
-
-    BENCH --> API
-    CMP --> API
-    K6 --> API
+```mermaid
+flowchart LR
+    SV[Referral API +<br/>Provider service] -->|OTLP| CL[Collector]
+    CL --> TP[(Tempo<br/>14d)]
+    CL --> PR[(Prometheus<br/>15d)]
+    TP --> GR[Grafana]
+    PR --> GR
+    PR -.exemplars.-> TP
 ```
 
 Every arrow into the provider domain is an HTTP request, never a query. The dotted line from the investigators to `AGENT_RUNTIME` is the orchestration flag; both runtimes route through the same deterministic policy box, which is the only thing that can approve a model's proposal.
@@ -130,52 +88,42 @@ Every transition below is enforced by an explicit allow-list in `workflow.py`. A
 
 ```mermaid
 stateDiagram-v2
+    direction LR
     [*] --> RECEIVED
-
     RECEIVED --> PARSING
     PARSING --> VALIDATING
-    PARSING --> NEEDS_HUMAN_REVIEW
-
-    VALIDATING --> WAITING_FOR_DOCUMENTS
     VALIDATING --> CHECKING_COVERAGE
-    VALIDATING --> NEEDS_HUMAN_REVIEW
-
     CHECKING_COVERAGE --> MATCHING_PROVIDER
-    CHECKING_COVERAGE --> COVERAGE_UNVERIFIED
-
     MATCHING_PROVIDER --> WAITING_FOR_SLOT_SELECTION
-    MATCHING_PROVIDER --> PROVIDER_UNAVAILABLE
-    MATCHING_PROVIDER --> NEEDS_HUMAN_REVIEW
-
     WAITING_FOR_SLOT_SELECTION --> BOOKING
     BOOKING --> CONFIRMED
+    CONFIRMED --> [*]
+```
+
+Every way of pausing or failing returns to `PARSING` rather than skipping ahead, so a resumed referral is re-evaluated from the start instead of continuing on stale conclusions:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    VALIDATING --> WAITING_FOR_DOCUMENTS
+    CHECKING_COVERAGE --> COVERAGE_UNVERIFIED
+    MATCHING_PROVIDER --> PROVIDER_UNAVAILABLE
+    PARSING --> NEEDS_HUMAN_REVIEW
+    VALIDATING --> NEEDS_HUMAN_REVIEW
+    MATCHING_PROVIDER --> NEEDS_HUMAN_REVIEW
     BOOKING --> BOOKING_FAILED
     BOOKING_FAILED --> WAITING_FOR_SLOT_SELECTION
-
-    VALIDATING --> PARSING
-    CHECKING_COVERAGE --> PARSING
-    MATCHING_PROVIDER --> PARSING
     WAITING_FOR_DOCUMENTS --> PARSING
     COVERAGE_UNVERIFIED --> PARSING
     PROVIDER_UNAVAILABLE --> PARSING
     NEEDS_HUMAN_REVIEW --> PARSING
-
-    CONFIRMED --> [*]
+    VALIDATING --> PARSING
+    CHECKING_COVERAGE --> PARSING
+    MATCHING_PROVIDER --> PARSING
     CANCELLED --> [*]
-
-    note right of CANCELLED
-        Reachable from every
-        non-terminal state
-    end note
-
-    note right of BOOKING
-        The only path to CONFIRMED.
-        Requires an explicit human
-        confirmation command first.
-    end note
 ```
 
-Two properties are worth reading off the diagram. `BOOKING` is the sole route into `CONFIRMED`, and it is gated on a recorded confirmation command. And every way of pausing or failing — waiting on documents, unverified coverage, no available provider, human review — returns to `PARSING` rather than skipping ahead, so a resumed referral is re-evaluated from the start instead of continuing on stale conclusions.
+`BOOKING` is the sole route into `CONFIRMED`, and it is gated on a recorded confirmation command. Cancellation is reachable from every non-terminal state and is omitted from both drawings, because thirteen identical edges would bury the shape of everything else.
 
 This diagram is verified by `tests/test_readme_diagram.py`, which parses it and compares it against the transition table in the code. If they ever disagree, the test fails rather than the README quietly misleading a reader.
 
@@ -185,12 +133,12 @@ The provider-ranking investigator ships in two interchangeable orchestrations, s
 
 ```mermaid
 flowchart LR
-    S([start]) --> D[decide<br/><i>model proposes one action</i>]
-    D --> V{validate<br/><i>deterministic policy</i>}
-    V -->|rejected| X([fail closed<br/>NEEDS_HUMAN_REVIEW])
-    V -->|get slots,<br/>under tool ceiling| O[observe<br/><i>gateway call</i>]
+    S([start]) --> D[decide]
+    D --> V{validate}
+    V -->|rejected| X([fail closed])
+    V -->|get slots| O[observe]
     O --> D
-    V -->|propose / escalate /<br/>turn limit| F([finish])
+    V -->|propose or<br/>escalate| F([finish])
 ```
 
 The graph owns which node runs next and the turn and tool-call ceilings. It does not own the candidate set, slot selection, referral state, booking, or the right to skip validation — a rejected proposal ends the investigation rather than being retried.
@@ -230,28 +178,14 @@ Booking is the one operation that spans both services. The referral domain decid
 
 ```mermaid
 sequenceDiagram
-    participant U as Person
+    autonumber
     participant R as Referral API
-    participant RD as Referral DB
     participant P as Provider service
-    participant PD as Provider DB
-
-    U->>R: confirm slot
-    R->>RD: record confirmation command
-    R->>RD: state -> BOOKING
-
-    R->>P: POST /internal/bookings (idempotency key)
-    Note over P,PD: one transaction
-    P->>PD: lock slot FOR UPDATE
-    P->>PD: check owning provider specialty
-    P->>PD: slot -> BUSY, insert appointment
-    P->>PD: record the decision
+    R->>R: record confirmation, state BOOKING
+    R->>P: book slot (idempotency key)
+    Note over P: one transaction:<br/>lock slot, verify provider,<br/>mark busy, insert appointment
     P-->>R: outcome + appointment id
-
-    R->>RD: state -> CONFIRMED
-    R-->>U: booked
-
-    Note over R,P: A lost reply is recoverable: repeating<br/>the request with the same key returns<br/>the original decision, never a second booking.
+    R->>R: state CONFIRMED
 ```
 
 
