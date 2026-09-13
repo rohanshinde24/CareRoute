@@ -15,6 +15,7 @@ dependencies = [
   "opentelemetry-instrumentation-sqlalchemy>=0.50b0,<1",
   "opentelemetry-sdk>=1.29,<2",
   "langgraph>=0.6,<0.7",
+  "redis>=5,<7",
   "psycopg[binary]>=3.2,<4",
   "pydantic-settings>=2.6,<3",
   "sqlalchemy>=2.0,<3",

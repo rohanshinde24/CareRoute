@@ -15,11 +15,12 @@ from app.provider_database import ProviderBase
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app"
 
-# Modules that legitimately own provider data, plus the harnesses that build
-# fixtures on both sides of the boundary. Harnesses are not the request path:
-# they are allowed two stores precisely because they must set up both.
-PROVIDER_SIDE = {"provider_models.py", "provider_database.py", "provider_queries.py", "provider_service.py", "provider_contracts.py", "provider_gateway.py", "provider_graph.py", "seed.py", "evaluation.py", "runtime_comparison.py", "fhir.py", "models.py"}
-PROVIDER_TABLES = {"providers", "provider_schedules", "appointment_slots", "appointments", "booking_attempts"}
+# Modules that legitimately own provider data, plus infrastructure that must see
+# both sides: harnesses that build fixtures, and the relay, which drains each
+# domain's own outbox. None of these are the request path - that is the thing
+# the boundary protects, and it is checked separately below.
+PROVIDER_SIDE = {"provider_models.py", "provider_database.py", "provider_queries.py", "provider_service.py", "provider_contracts.py", "provider_gateway.py", "provider_graph.py", "seed.py", "evaluation.py", "runtime_comparison.py", "fhir.py", "models.py", "relay.py"}
+PROVIDER_TABLES = {"providers", "provider_schedules", "appointment_slots", "appointments", "booking_attempts", "provider_outbox"}
 
 
 def test_the_two_metadatas_share_no_table():
@@ -73,3 +74,31 @@ def test_cross_boundary_references_survive_as_plain_columns():
     referral_ref = inspect(Appointment).columns["referral_id"]
     assert not referral_ref.foreign_keys
     assert referral_ref.index is True
+
+
+def test_each_domain_has_its_own_outbox():
+    """A shared outbox would reintroduce the cross-database write the split removed.
+
+    The whole point of the pattern is that an event commits in the same
+    transaction as the state change that produced it, which is only possible if
+    the outbox lives in that same database.
+    """
+    assert "referral_outbox" in Base.metadata.tables
+    assert "provider_outbox" in ProviderBase.metadata.tables
+    assert "provider_outbox" not in Base.metadata.tables
+    assert "referral_outbox" not in ProviderBase.metadata.tables
+
+
+def test_the_relay_never_runs_inside_a_request():
+    """Publishing must not sit in the request path.
+
+    If a request published directly, a broker outage would turn into a failed
+    user-facing operation - exactly what the outbox exists to prevent.
+    """
+    import pathlib
+
+    for module in ("main.py", "booking.py", "commands.py", "agent.py", "provider_service.py", "provider_queries.py"):
+        source = (APP / module).read_text()
+        assert "import relay" not in source and "from .relay" not in source, (
+            f"{module} reaches the relay directly; publishing belongs outside the request path"
+        )

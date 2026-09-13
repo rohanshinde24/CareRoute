@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from .events import OutboxMixin
 from .provider_database import ProviderBase
 
 
@@ -99,3 +100,9 @@ class BookingAttempt(ProviderBase):
     appointment_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     detail: Mapped[str | None] = mapped_column(String(300), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ProviderOutbox(OutboxMixin, ProviderBase):
+    """Provider-domain outbox, written inside the booking transaction itself."""
+
+    __tablename__ = "provider_outbox"

@@ -8,6 +8,7 @@ from .database import Base
 # Provider-owned state enums are defined with the tables they describe and
 # re-exported here so referral-side imports have one source of truth.
 from .provider_models import AppointmentStatus, SlotStatus  # noqa: F401
+from .events import OutboxMixin
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -139,3 +140,9 @@ class EvaluationRun(Base):
     result: Mapped[dict[str, Any]] = mapped_column(JSON)
     score: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ReferralOutbox(OutboxMixin, Base):
+    """Referral-domain outbox. Written in the same transaction as the state change."""
+
+    __tablename__ = "referral_outbox"

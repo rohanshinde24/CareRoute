@@ -14,6 +14,7 @@ from sqlalchemy import select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
+from .events import EventType, build_event
 from .metrics import record_booking_attempt
 from .pagination import clamp_limit, decode_cursor, encode_cursor
 from .provider_contracts import (
@@ -37,6 +38,7 @@ from .provider_models import (
     AppointmentStatus,
     BookingAttempt,
     Provider,
+    ProviderOutbox,
     ProviderSchedule,
     SlotStatus,
 )
@@ -181,7 +183,23 @@ def _replay(attempt: BookingAttempt) -> BookingResult:
     )
 
 
+def _announce(db: Session, request: BookingRequest, outcome: str, appointment_id: uuid.UUID | None) -> None:
+    """Write the domain event in the booking transaction itself.
+
+    Not after the commit: a publish outside this transaction could announce a
+    booking that rolled back, or miss one that did not.
+    """
+    from .telemetry import current_traceparent
+
+    event_type = EventType.APPOINTMENT_BOOKED if outcome == "booked" else EventType.BOOKING_REFUSED
+    payload = {"referral_id": request.referral_id, "slot_id": request.slot_id, "outcome": outcome, "idempotency_key": request.idempotency_key}
+    if appointment_id is not None:
+        payload["appointment_id"] = appointment_id
+    db.add(ProviderOutbox(**build_event(event_type, "careroute-provider-service", payload, current_traceparent())))
+
+
 def _remember(db: Session, request: BookingRequest, outcome: str, appointment_id: uuid.UUID | None, detail: str | None) -> BookingResult:
+    _announce(db, request, outcome, appointment_id)
     db.add(
         BookingAttempt(
             idempotency_key=request.idempotency_key,

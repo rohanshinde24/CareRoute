@@ -21,6 +21,7 @@ SAFE_LABEL_KEYS = frozenset(
         "operation",
         "outcome",
         "result",
+        "domain",
         "service",
         "specialty",
         "terminal_state",
@@ -139,6 +140,19 @@ class _Instruments:
             "careroute.provider.retry_exhausted",
             description="Provider gateway calls that exhausted their bounded retries.",
         )
+        self.relay_dispatched = meter.create_counter(
+            "careroute.relay.dispatched",
+            description="Outbox events published to the broker, by outcome.",
+        )
+        self.outbox_depth = meter.create_histogram(
+            "careroute.outbox.depth",
+            description="Undispatched outbox rows at the end of a relay pass.",
+        )
+        self.outbox_age = meter.create_histogram(
+            "careroute.outbox.age",
+            unit="s",
+            description="Age of the oldest undispatched outbox row. A single stuck row matters more than a large moving backlog.",
+        )
         self.booking_attempts = meter.create_counter(
             "careroute.booking.attempts",
             description="Booking attempts by result, including idempotent duplicate suppression.",
@@ -194,3 +208,13 @@ def record_provider_retry_exhausted(operation: str) -> None:
 
 def record_booking_attempt(result: str) -> None:
     _add("booking_attempts", 1, {"result": result})
+
+
+def record_relay_dispatch(outcome: str, count: int) -> None:
+    _add("relay_dispatched", count, {"outcome": outcome})
+
+
+def record_outbox_backlog(domain: str, depth: int, age_seconds: float | None) -> None:
+    _record("outbox_depth", depth, {"domain": domain})
+    if age_seconds is not None:
+        _record("outbox_age", age_seconds, {"domain": domain})

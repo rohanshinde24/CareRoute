@@ -145,3 +145,15 @@ def current_trace_id() -> str | None:
     if not context.is_valid:
         return None
     return f"{context.trace_id:032x}"
+
+
+def current_traceparent() -> str | None:
+    """W3C traceparent for the active span, for carrying into an event envelope.
+
+    A consumer links back to this rather than nesting under it: queue dwell time
+    is not operation duration.
+    """
+    context = trace.get_current_span().get_span_context()
+    if not context.is_valid:
+        return None
+    return f"00-{context.trace_id:032x}-{context.span_id:016x}-{context.trace_flags:02x}"

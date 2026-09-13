@@ -17,6 +17,22 @@ services:
       - "55432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+  # Domain event broker. AOF with appendfsync everysec: a crash can lose up to a
+  # second of acknowledged events, which is survivable because the outbox holds
+  # the authoritative record and undispatched rows are simply relayed again.
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - redis_data:/data
+
   # The provider domain owns its storage: separate instance, separate volume,
   # separate health check, separate migration lineage.
   provider-db:
@@ -140,6 +156,26 @@ services:
     depends_on:
       - tempo
       - prometheus
+  relay:
+    build: ./backend
+    command: python -m app.relay
+    environment:
+      DATABASE_URL: postgresql+psycopg://careroute:careroute@db:5432/careroute
+      PROVIDER_DATABASE_URL: postgresql+psycopg://careroute:careroute@provider-db:5432/careroute_provider
+      REDIS_URL: redis://redis:6379/0
+      RELAY_INTERVAL_SECONDS: ${RELAY_INTERVAL_SECONDS:-1}
+      TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://otel-collector:4318/v1/traces}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: ${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:-http://otel-collector:4318/v1/metrics}
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      provider-db:
+        condition: service_healthy
+
   web:
     build: ./frontend
     environment:
@@ -148,6 +184,7 @@ services:
     ports: ["${CAREROUTE_WEB_PORT:-3001}:3000"]
     depends_on: [api]
 volumes:
+  redis_data:
   postgres_data:
   provider_postgres_data:
   tempo_data:
