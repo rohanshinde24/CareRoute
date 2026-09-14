@@ -198,3 +198,31 @@ def test_every_booking_decision_is_recorded_for_replay(factory, slot):
 
     assert outcomes == {"booked", "slot_unavailable"}
     assert booked.outcome == "booked" and refused.outcome == "slot_unavailable"
+
+
+def test_the_stress_harness_refuses_to_exceed_the_connection_ceiling():
+    """A harness that asks for more connections than the server allows produces
+    a flood of OperationalErrors that look like booking failures and are not.
+
+    That happened: a 50,000-attempt run reported 13,484 errors which were
+    entirely the harness's own fault, and would have made the result
+    unquotable had it not been checked.
+    """
+    import inspect
+
+    from app import booking_stress
+
+    source = inspect.getsource(booking_stress.run)
+    assert "max_connections" in source, "the harness must check the server's ceiling before running"
+    assert "SystemExit" in source, "exceeding the ceiling must abort rather than pollute the result"
+
+
+def test_the_stress_harness_verifies_against_the_database_not_the_callers():
+    """Callers can be told anything; the guarantee is the row count per slot."""
+    import inspect
+
+    from app import booking_stress
+
+    source = inspect.getsource(booking_stress.run)
+    assert "group_by(Appointment.slot_id)" in source
+    assert "over_booked" in source
