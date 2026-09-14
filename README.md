@@ -200,8 +200,32 @@ sequenceDiagram
 
 - **Durable workflows** via Inngest: retryable and memoized steps, waits, timeouts, and cancellation.
 - **Idempotent commands**: document arrival, slot selection, confirmation, and cancellation are deduplicated, so a retried or duplicated request cannot double-apply.
-- **Effectively-once booking**: confirmation-gated and row-locked inside the provider database, so concurrent confirmations cannot produce two appointments for one slot. Proven by tests that race several bookings at a single slot.
+- **Effectively-once booking**: confirmation-gated and row-locked inside the provider database, so concurrent confirmations cannot produce two appointments for one slot.
 - **Recovery**: lost responses and stale slot selections are handled explicitly rather than assumed away.
+
+*Effectively-once*, not exactly-once, is the deliberate word. Exactly-once delivery is not achievable over an unreliable network — the transport can always retry and a request can always arrive twice. What is achievable is exactly-once **effects**: the request may arrive any number of times and the side effect happens once.
+
+### Booking under contention, measured
+
+`careroute-booking-stress` drives the guarantee against real PostgreSQL. Two modes, because they answer different questions.
+
+| Mode | Shape | Attempts | Duplicates |
+|---|---|---|---|
+| Volume | 1M attempts, 80 workers, 10,000 slots | ~100 racing per slot, spread over 22 min | **0** |
+| Contention | 500 rounds × 80 racers at a single slot | barrier-released, simultaneous | **0** |
+| Contention, **lock removed** | 20 rounds × 80 racers | barrier-released, simultaneous | **1,568** |
+
+Two design choices make the contention mode the sharp test. A `threading.Barrier` releases every racer at the same instant, so attempts genuinely overlap instead of arriving in a stream. And **every racer carries a distinct idempotency key** — with shared keys the unique index alone would prevent duplicates and a broken lock would go unnoticed, so distinct keys leave the row lock as the only guard.
+
+That distinction is not hypothetical. Neither the six-racer unit test nor a million spread attempts detected a deliberately removed lock; 80 simultaneous racers produced 1,568 duplicate bookings across 20 slots. **Contention per instant matters more than total volume**, and a mutation that survives a weak test has not been shown to be safe.
+
+### Where this stops scaling
+
+On this hardware the locked booking transaction sustained roughly **550–600 attempts per second on one hot slot**. Once callers contend on the same row, throughput stays roughly flat and additional callers mostly add queueing latency — raising racers from 80 to 250 left per-row throughput near 550/s while the last racer's wait grew from 131 ms to 454 ms.
+
+That number is a measurement of this critical section on this machine, not a theoretical limit; it depends on hardware, WAL and fsync behaviour, isolation level, and what the transaction does. Across *different* slots there is no such penalty, since locks are per row.
+
+Horizontal scaling does not move it. The bottleneck is a serialized database row rather than application compute, and more replicas could increase offered load and connection pressure unless concurrency is bounded. A connection pooler such as PgBouncer relieves connection pressure but does not make the lock process faster. Raising hot-row throughput means changing the contention model — admission control, a reservation or lease design, or serialized queueing — and which of those is right depends on what the product promises the user who arrives second.
 
 ## Observability
 
@@ -260,6 +284,16 @@ cd frontend && npm run lint && npm run build
 docker compose exec api careroute-benchmark
 ```
 
+Booking concurrency, against real PostgreSQL:
+
+```bash
+cd backend && careroute-booking-stress --contention --rounds 500 --racers 80
+```
+
+```bash
+cd backend && careroute-booking-stress --attempts 1000000 --workers 80 --slots 10000
+```
+
 The benchmark is a deterministic 19-case suite with hidden ground truth and **no LLM judge**. It measures routing correctness, duplicate bookings, forbidden-action rate, and resume-recovery rate. Automated tests never call an external model.
 
 Evaluation fixtures are tagged and server-side isolated: ordinary requests cannot opt into them, and they are excluded from product lists and normal candidate discovery.
@@ -306,6 +340,7 @@ Stated plainly, because a system like this is only as trustworthy as its honesty
 - The referral state change that follows a booking is a second transaction in the other database. The appointment is authoritative if one is interrupted, and repair is forward-only. There is no automatic reconciler yet.
 - The outbox and relay publish domain events, but nothing consumes them yet.
 - Under sustained overload the API sheds load rather than queueing it, so a saturation test shows elevated error rates by design; it stays responsive and recovers unaided once load stops.
+- The contention figures are measured on one machine against a local PostgreSQL, and the racer counts are harness parameters bounded by `max_connections`, not a concurrency capability. They describe a correctness guarantee holding under pressure, not throughput the system offers to users.
 - Provider matching uses case-insensitive location substring comparison — not geocoding, distance, travel time, payer network, language, or subspecialty.
 - The Inngest dev server keeps run history in memory; domain state lives in PostgreSQL.
 - No end-user authentication or authorization, binary document storage, payer integration, centralized logging, or hosted deployment.
