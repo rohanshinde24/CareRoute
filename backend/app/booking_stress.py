@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import threading
 import time
 import uuid
 from collections import Counter
@@ -86,6 +87,76 @@ def _attempt(factory, slot_ids: list[uuid.UUID], replay_rate: float) -> str:
             return f"error:{type(exc).__name__}"
 
 
+def run_contention(rounds: int, racers: int) -> dict:
+    """Maximum contention: every racer hits ONE slot at the same instant.
+
+    Two deliberate choices make this the sharpest test of the row lock.
+
+    A barrier releases every worker simultaneously, so the attempts genuinely
+    overlap rather than arriving in a stream spread over time.
+
+    Every racer carries a *distinct* idempotency key. With shared keys the
+    idempotency layer alone would prevent duplicates and a broken lock would go
+    unnoticed; distinct keys mean the row lock is the only thing standing
+    between the racers and a double booking.
+    """
+    engine = create_engine(settings.provider_database_url, pool_size=racers + 4, max_overflow=8, pool_timeout=30)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    with engine.connect() as probe:
+        ceiling = int(probe.execute(text("SHOW max_connections")).scalar())
+    if racers + 12 > ceiling:
+        raise SystemExit(f"  {racers} racers needs ~{racers + 12} connections but the server allows {ceiling}.")
+
+    slot_ids, provider_id, schedule_id = _setup(factory, rounds)
+    try:
+        outcomes = Counter()
+        started = time.perf_counter()
+        for slot_id in slot_ids:
+            gate = threading.Barrier(racers)
+
+            def race(_):
+                gate.wait()
+                request = BookingRequest(
+                    referral_id=uuid.uuid4(),
+                    slot_id=slot_id,
+                    requested_specialty=SPECIALTY,
+                    # Distinct per racer: the lock is the only guard.
+                    idempotency_key=f"race:{slot_id}:{uuid.uuid4()}",
+                )
+                with factory() as db:
+                    try:
+                        return book_slot(db, request).outcome
+                    except Exception as exc:
+                        db.rollback()
+                        return f"error:{type(exc).__name__}"
+
+            with ThreadPoolExecutor(max_workers=racers) as pool:
+                outcomes.update(pool.map(race, range(racers)))
+        elapsed = time.perf_counter() - started
+
+        with factory() as db:
+            per_slot = db.execute(
+                select(Appointment.slot_id, func.count(Appointment.id))
+                .where(Appointment.slot_id.in_(slot_ids))
+                .group_by(Appointment.slot_id)
+            ).all()
+            over_booked = [(str(s), c) for s, c in per_slot if c > 1]
+
+        return {
+            "rounds": rounds,
+            "racers_per_round": racers,
+            "attempts": rounds * racers,
+            "seconds": round(elapsed, 1),
+            "outcomes": dict(outcomes),
+            "slots_booked": sum(c for _, c in per_slot),
+            "over_booked_slots": over_booked,
+            "duplicate_bookings": sum(c - 1 for _, c in per_slot if c > 1),
+        }
+    finally:
+        _teardown(factory, provider_id, schedule_id)
+
+
 def run(attempts: int, workers: int, slots: int, replay_rate: float) -> dict:
     engine = create_engine(settings.provider_database_url, pool_size=workers + 4, max_overflow=8, pool_timeout=30)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -142,7 +213,22 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=64)
     parser.add_argument("--slots", type=int, default=100)
     parser.add_argument("--replay-rate", type=float, default=0.25)
+    parser.add_argument("--contention", action="store_true", help="maximum contention: every racer hits one slot simultaneously")
+    parser.add_argument("--rounds", type=int, default=500)
+    parser.add_argument("--racers", type=int, default=80)
     args = parser.parse_args()
+
+    if args.contention:
+        report = run_contention(args.rounds, args.racers)
+        print(f"  rounds          {report['rounds']:,} slots, {report['racers_per_round']} racers released simultaneously at each")
+        print(f"  attempts        {report['attempts']:,} in {report['seconds']}s, every racer with a distinct idempotency key")
+        print(f"  outcomes        {report['outcomes']}")
+        print(f"  appointments    {report['slots_booked']} across {report['rounds']} contested slots")
+        print(f"  DUPLICATES      {report['duplicate_bookings']}")
+        if report["over_booked_slots"]:
+            raise SystemExit(f"  GUARANTEE VIOLATED: {report['over_booked_slots']}")
+        print("  guarantee held under maximum contention")
+        return
 
     report = run(args.attempts, args.workers, args.slots, args.replay_rate)
 

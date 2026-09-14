@@ -226,3 +226,19 @@ def test_the_stress_harness_verifies_against_the_database_not_the_callers():
     source = inspect.getsource(booking_stress.run)
     assert "group_by(Appointment.slot_id)" in source
     assert "over_booked" in source
+
+
+def test_maximum_contention_mode_gives_every_racer_a_distinct_key():
+    """Shared keys would let idempotency mask a broken lock.
+
+    If every racer reused one key, the booking_attempts unique index alone would
+    prevent duplicates and a missing row lock would go unnoticed. Distinct keys
+    make the lock the only guard, which is what makes this the sharp test.
+    """
+    import inspect
+
+    from app import booking_stress
+
+    source = inspect.getsource(booking_stress.run_contention)
+    assert "threading.Barrier" in source, "racers must be released simultaneously"
+    assert "uuid.uuid4()" in source and "race:" in source, "each racer needs a distinct idempotency key"
