@@ -19,7 +19,7 @@ APP = pathlib.Path(__file__).resolve().parents[1] / "app"
 # both sides: harnesses that build fixtures, and the relay, which drains each
 # domain's own outbox. None of these are the request path - that is the thing
 # the boundary protects, and it is checked separately below.
-PROVIDER_SIDE = {"provider_models.py", "provider_database.py", "provider_queries.py", "provider_service.py", "provider_contracts.py", "provider_gateway.py", "provider_graph.py", "seed.py", "evaluation.py", "runtime_comparison.py", "fhir.py", "models.py", "relay.py"}
+PROVIDER_SIDE = {"provider_models.py", "provider_database.py", "provider_queries.py", "provider_service.py", "provider_contracts.py", "provider_gateway.py", "provider_graph.py", "seed.py", "evaluation.py", "runtime_comparison.py", "booking_stress.py", "fhir.py", "models.py", "relay.py"}
 PROVIDER_TABLES = {"providers", "provider_schedules", "appointment_slots", "appointments", "booking_attempts", "provider_outbox"}
 
 
