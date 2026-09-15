@@ -23,6 +23,8 @@ SAFE_LABEL_KEYS = frozenset(
         "result",
         "domain",
         "event_type",
+        "state",
+        "target",
         "service",
         "specialty",
         "terminal_state",
@@ -162,6 +164,10 @@ class _Instruments:
             "careroute.reconciliations",
             description="Reconciler outcomes. A steady non-zero 'reconciled' rate means events are being lost.",
         )
+        self.circuit_state = meter.create_counter(
+            "careroute.circuit.transitions",
+            description="Circuit breaker outcomes: opening, rejecting, and closing again.",
+        )
         self.booking_attempts = meter.create_counter(
             "careroute.booking.attempts",
             description="Booking attempts by result, including idempotent duplicate suppression.",
@@ -235,3 +241,7 @@ def record_event_consumed(event_type: str, outcome: str) -> None:
 
 def record_reconciliation(outcome: str) -> None:
     _add("reconciliations", 1, {"outcome": outcome})
+
+
+def record_circuit_state(target: str, state: str) -> None:
+    _add("circuit_state", 1, {"target": target, "state": state})

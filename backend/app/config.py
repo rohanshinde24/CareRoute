@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     provider_timeout_seconds: float = 3.0
     provider_retry_attempts: int = 3
     provider_retry_backoff_seconds: float = 0.1
+    # The breaker wraps a whole call, retries included, so the threshold counts
+    # calls that exhausted their retry budget rather than individual attempts.
+    provider_breaker_enabled: bool = True
+    provider_breaker_failure_threshold: int = 5
+    provider_breaker_reset_seconds: float = 30.0
     provider_internal_token: str = "careroute-local-synthetic"
     telemetry_enabled: bool = False
     otel_exporter_otlp_traces_endpoint: str = "http://localhost:4318/v1/traces"

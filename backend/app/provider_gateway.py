@@ -14,7 +14,8 @@ from . import provider_queries
 from .config import Settings, settings
 from .provider_contracts import AppointmentListResult, BookingRequest, BookingResult, ProviderListResult, ProviderPage, ProviderSpecialtyListResult, SlotDetail, SlotListResult, SlotPage
 from .telemetry import operation, set_span_attributes
-from .metrics import record_provider_request, record_provider_retry_exhausted
+from .circuit_breaker import CircuitOpen, breaker_for
+from .metrics import record_circuit_state, record_provider_request, record_provider_retry_exhausted
 
 
 class ProviderGatewayError(RuntimeError):
@@ -179,6 +180,55 @@ class HttpProviderGateway:
         the provider side records the decision against it, so a retry after a lost
         response returns the original outcome instead of acting twice.
         """
+        breaker = self._breaker()
+        if breaker is not None:
+            try:
+                breaker.before_call()
+            except CircuitOpen as exc:
+                # Transient, not protocol: the referral stays resumable and the
+                # caller retries later rather than failing closed on a
+                # dependency that is merely unavailable.
+                record_provider_request(operation_name, "circuit_open")
+                record_circuit_state("provider-service", "rejected")
+                raise ProviderGatewayTransientError(str(exc)) from exc
+
+        try:
+            payload = await self._attempt_with_retries(method, path, operation_name=operation_name, correlation_id=correlation_id, params=params, json=json, trusted=trusted)
+        except ProviderGatewayTransientError:
+            # Only transient failures move the breaker. A protocol error means
+            # this system sent something wrong, which says nothing about the
+            # dependency's health.
+            if breaker is not None:
+                breaker.record_failure()
+                record_circuit_state("provider-service", breaker.state.value)
+            raise
+        if breaker is not None:
+            was_closed = breaker.state.value == "closed"
+            breaker.record_success()
+            if not was_closed:
+                record_circuit_state("provider-service", "closed")
+        return payload
+
+    def _breaker(self):
+        if not self.config.provider_breaker_enabled:
+            return None
+        return breaker_for(
+            "provider-service",
+            self.config.provider_breaker_failure_threshold,
+            self.config.provider_breaker_reset_seconds,
+        )
+
+    async def _attempt_with_retries(
+        self,
+        method: str,
+        path: str,
+        *,
+        operation_name: str,
+        correlation_id: uuid.UUID,
+        params: dict[str, str] | None = None,
+        json: dict | None = None,
+        trusted: bool = False,
+    ) -> dict:
         headers = {"X-CareRoute-Correlation-ID": str(correlation_id)}
         if trusted:
             headers["X-CareRoute-Internal-Token"] = self.config.provider_internal_token
