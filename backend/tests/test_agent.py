@@ -2,6 +2,17 @@ import asyncio
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
+from app.adversarial_models import (
+    ConflictingModel,
+    EmptyAvailabilityProviderModel,
+    LaterAvailabilityProviderModel,
+    InvalidModel,
+    OutOfCandidateProviderModel,
+    PrematureProposalModel,
+    PrematureProviderProposalModel,
+    UngroundedDocumentModel,
+    UnobservedProviderModel,
+)
 from app.provider_gateway import LocalProviderGateway
 from app.agent import NextAction, ReferralCoordinator
 from app.model_providers import DeterministicReferralModel, DocumentInvestigationAction, DocumentInvestigationDecision, InvestigationAction, InvestigationDecision, ModelResponseError, ProviderInvestigationAction, ProviderInvestigationDecision, ReferralInterpretation
@@ -84,18 +95,6 @@ def test_escalates_when_coverage_is_missing(db, provider_db):
     assert result.state == ReferralState.COVERAGE_UNVERIFIED
     assert result.next_action == NextAction.VERIFY_COVERAGE
 
-class ConflictingModel:
-    name = "conflicting-test-model"
-
-    async def interpret(self, _):
-        return ReferralInterpretation(specialty="Neurology", confidence=1, is_ambiguous=False, evidence=["test"])
-
-class InvalidModel:
-    name = "invalid-test-model"
-
-    async def interpret(self, _):
-        raise ModelResponseError("Invalid structured model response")
-
 def test_conflicting_model_specialty_requires_human_review(db, provider_db):
     referral = build_case(db, provider_db)
     result = run(ReferralCoordinator(db, ConflictingModel(), provider_gateway=LocalProviderGateway(provider_db)), referral)
@@ -137,15 +136,6 @@ def test_ambiguous_referral_invokes_bounded_evidence_investigation(db, provider_
     assert result.state == ReferralState.WAITING_FOR_SLOT_SELECTION
     assert decisions == ["GET_REFERRAL_HISTORY", "PROPOSE_SPECIALTY"]
 
-class PrematureProposalModel:
-    name = "premature-proposal"
-
-    async def interpret(self, _):
-        return ReferralInterpretation(specialty=None, confidence=0, is_ambiguous=True, evidence=[])
-
-    async def investigate(self, _):
-        return InvestigationDecision(action=InvestigationAction.PROPOSE_SPECIALTY, proposed_specialty="Cardiology")
-
 def test_investigation_policy_rejects_premature_specialty_proposal(db, provider_db):
     referral = build_case(db, provider_db)
     referral.requested_specialty = "Unknown"
@@ -166,15 +156,6 @@ def test_referenced_procedure_triggers_bounded_document_investigation(db, provid
     assert result.state == ReferralState.WAITING_FOR_DOCUMENTS
     assert result.missing_documents == ["holter-report"]
     assert decisions == ["GET_RECENT_PROCEDURES", "PROPOSE_DOCUMENT"]
-
-class UngroundedDocumentModel:
-    name = "ungrounded-document"
-
-    async def interpret(self, _):
-        return ReferralInterpretation(specialty="Cardiology", confidence=1, is_ambiguous=False, evidence=["Cardiology"])
-
-    async def investigate_documents(self, _):
-        return DocumentInvestigationDecision(action=DocumentInvestigationAction.PROPOSE_DOCUMENT, proposed_document_type="pathology-report")
 
 def test_document_policy_rejects_premature_ungrounded_proposal(db, provider_db):
     referral = build_case(db, provider_db)
@@ -237,15 +218,6 @@ def test_contextual_provider_ranking_compares_matching_candidates(db, provider_d
     assert decisions == ["GET_AVAILABLE_SLOTS", "GET_AVAILABLE_SLOTS", "PROPOSE_PROVIDER"]
     assert "preference was applied" in result.summary
 
-class PrematureProviderProposalModel:
-    name = "premature-provider-proposal"
-
-    async def interpret(self, _):
-        return ReferralInterpretation(specialty="Cardiology", confidence=1, is_ambiguous=False, evidence=["Cardiology"])
-
-    async def investigate_providers(self, step):
-        return ProviderInvestigationDecision(action=ProviderInvestigationAction.PROPOSE_PROVIDER, proposed_provider_id=step.candidate_providers[0].id)
-
 def test_provider_policy_rejects_premature_proposal(db, provider_db):
     referral = build_case(db, provider_db)
     add_rankable_provider(db, provider_db, referral)
@@ -255,22 +227,6 @@ def test_provider_policy_rejects_premature_proposal(db, provider_db):
     assert result.state == ReferralState.NEEDS_HUMAN_REVIEW
     assert "not allowed by policy" in result.summary
 
-class OutOfCandidateProviderModel:
-    name = "out-of-candidate-provider"
-
-    def __init__(self):
-        self.observed = False
-
-    async def interpret(self, _):
-        return ReferralInterpretation(specialty="Cardiology", confidence=1, is_ambiguous=False, evidence=["Cardiology"])
-
-    async def investigate_providers(self, step):
-        if not self.observed:
-            self.observed = True
-            matching = next(candidate for candidate in step.candidate_providers if "San Francisco" in candidate.location)
-            return ProviderInvestigationDecision(action=ProviderInvestigationAction.GET_AVAILABLE_SLOTS, target_provider_id=matching.id)
-        return ProviderInvestigationDecision(action=ProviderInvestigationAction.PROPOSE_PROVIDER, proposed_provider_id=uuid.uuid4())
-
 def test_provider_policy_rejects_out_of_candidate_proposal(db, provider_db):
     referral = build_case(db, provider_db)
     add_rankable_provider(db, provider_db, referral)
@@ -279,22 +235,6 @@ def test_provider_policy_rejects_out_of_candidate_proposal(db, provider_db):
 
     assert result.state == ReferralState.NEEDS_HUMAN_REVIEW
     assert "not in the deterministic candidate set" in result.summary
-
-class UnobservedProviderModel:
-    name = "unobserved-provider"
-
-    def __init__(self):
-        self.observed = False
-
-    async def interpret(self, _):
-        return ReferralInterpretation(specialty="Cardiology", confidence=1, is_ambiguous=False, evidence=["Cardiology"])
-
-    async def investigate_providers(self, step):
-        matching = [candidate for candidate in step.candidate_providers if "San Francisco" in candidate.location]
-        if not self.observed:
-            self.observed = True
-            return ProviderInvestigationDecision(action=ProviderInvestigationAction.GET_AVAILABLE_SLOTS, target_provider_id=matching[0].id)
-        return ProviderInvestigationDecision(action=ProviderInvestigationAction.PROPOSE_PROVIDER, proposed_provider_id=matching[1].id)
 
 def test_provider_policy_rejects_unobserved_matching_candidate(db, provider_db):
     referral = build_case(db, provider_db)
@@ -306,21 +246,6 @@ def test_provider_policy_rejects_unobserved_matching_candidate(db, provider_db):
     assert result.state == ReferralState.NEEDS_HUMAN_REVIEW
     assert "not allowed by policy" in result.summary
 
-class EmptyAvailabilityProviderModel:
-    name = "empty-availability-provider"
-
-    async def interpret(self, _):
-        return ReferralInterpretation(specialty="Cardiology", confidence=1, is_ambiguous=False, evidence=["Cardiology"])
-
-    async def investigate_providers(self, step):
-        matching = [candidate for candidate in step.candidate_providers if "San Francisco" in candidate.location]
-        observed = step.observations.get("available_slots", {})
-        for candidate in matching:
-            if str(candidate.id) not in observed:
-                return ProviderInvestigationDecision(action=ProviderInvestigationAction.GET_AVAILABLE_SLOTS, target_provider_id=candidate.id)
-        empty = next(candidate for candidate in matching if "No availability" in candidate.location)
-        return ProviderInvestigationDecision(action=ProviderInvestigationAction.PROPOSE_PROVIDER, proposed_provider_id=empty.id)
-
 def test_provider_policy_rejects_candidate_without_free_slots(db, provider_db):
     referral = build_case(db, provider_db)
     add_rankable_provider(db, provider_db, referral, name="A Empty Cardiologist", location="San Francisco, CA - No availability", with_slot=False)
@@ -330,20 +255,6 @@ def test_provider_policy_rejects_candidate_without_free_slots(db, provider_db):
 
     assert result.state == ReferralState.NEEDS_HUMAN_REVIEW
     assert "no observed free-slot availability" in result.summary
-
-class LaterAvailabilityProviderModel:
-    name = "later-availability-provider"
-
-    async def interpret(self, _):
-        return ReferralInterpretation(specialty="Cardiology", confidence=1, is_ambiguous=False, evidence=["Cardiology"])
-
-    async def investigate_providers(self, step):
-        matching = [candidate for candidate in step.candidate_providers if "San Francisco" in candidate.location]
-        observed = step.observations.get("available_slots", {})
-        for candidate in matching:
-            if str(candidate.id) not in observed:
-                return ProviderInvestigationDecision(action=ProviderInvestigationAction.GET_AVAILABLE_SLOTS, target_provider_id=candidate.id)
-        return ProviderInvestigationDecision(action=ProviderInvestigationAction.PROPOSE_PROVIDER, proposed_provider_id=matching[0].id)
 
 def test_provider_policy_rejects_later_availability(db, provider_db):
     referral = build_case(db, provider_db)

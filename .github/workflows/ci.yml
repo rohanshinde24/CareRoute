@@ -71,6 +71,14 @@ jobs:
         run: pytest -q -rs
         working-directory: backend
 
+      - name: Agent policy evaluation
+        working-directory: backend
+        # The suite already runs these scenarios. This runs them through the
+        # command-line entry point as well, so the report a human reads is
+        # itself exercised, and prints the boundary's coverage into the build
+        # log rather than leaving it to a passing assertion nobody sees.
+        run: careroute-agent-eval
+
       - name: No test may be skipped in CI
         working-directory: backend
         run: |

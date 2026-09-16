@@ -1,8 +1,11 @@
 pyproject.toml
 app/__init__.py
+app/adversarial_models.py
 app/agent.py
+app/agent_eval.py
 app/booking.py
 app/booking_stress.py
+app/circuit_breaker.py
 app/commands.py
 app/config.py
 app/consumer.py
@@ -42,9 +45,11 @@ careroute_api.egg-info/entry_points.txt
 careroute_api.egg-info/requires.txt
 careroute_api.egg-info/top_level.txt
 tests/test_agent.py
+tests/test_agent_eval.py
 tests/test_agent_runtime_parity.py
 tests/test_api.py
 tests/test_booking_concurrency.py
+tests/test_circuit_breaker.py
 tests/test_consumer.py
 tests/test_domain_boundary.py
 tests/test_evaluation.py
@@ -57,5 +62,6 @@ tests/test_p2_workflow.py
 tests/test_pagination.py
 tests/test_provider_boundary.py
 tests/test_readme_diagram.py
+tests/test_reconciler_event_loss.py
 tests/test_telemetry.py
 tests/test_tools.py

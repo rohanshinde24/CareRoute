@@ -33,6 +33,36 @@ A valid provider proposal changes only the **presentation order** of candidates.
 
 This is auditable rather than asserted. Every model turn emits an `agent.turn` span immediately followed by an `agent.policy.validate` span, so the trace itself shows that deterministic validation ran between the model speaking and anything occurring.
 
+### The boundary, adversarially evaluated
+
+Claiming a boundary holds is easy. `careroute-agent-eval` drives a model that misbehaves *deliberately* against all three investigator loops and reports which guardrail caught it.
+
+Fourteen scenarios, thirteen of them violations, each wrong in exactly one respect: a specialty that contradicts the referral, a specialty proposed before any evidence was gathered, a malformed response, a document not grounded in an observed procedure, a provider proposed before its availability was looked at, a provider outside the candidate set entirely, a proposal that skipped a matching candidate, one with no free slots, one that is not the earliest available.
+
+Two design choices are what make it an evaluation rather than a louder test run.
+
+**Each case names the rule it should trip.** Rejection alone is not a pass — rejection by the rule being probed is. A violation stopped by an unrelated rule is a boundary that is right by accident, and the report counts those separately. This distinction is not hypothetical: swapping one rule's message leaves every run still failing closed in `NEEDS_HUMAN_REVIEW`, and a coarser harness would score it green.
+
+**Honest models are scenarios too.** A boundary that refused everything would score perfectly against violations alone, so a correctly-ranking model and two that legally decline — escalate, request clarification — run alongside, and their acceptance is checked just as strictly. The declining cases must degrade to unranked human slot selection rather than fail.
+
+The provider cases run under **both investigation runtimes**. The policy is shared code; running both is the evidence.
+
+```
+policy violations attempted     13
+refused by the intended rule    13
+refused by a different rule      0
+reached referral state           0
+legal decisions honoured         8 of 8
+escalations degraded to human    4
+
+specialty: 4/4   document: 2/2   provider: 16/16
+both runtimes reached the same verdict on all 8 provider cases
+```
+
+The harness exits non-zero on any deviation and runs in CI. Its own ability to fail is tested: deleting a policy rule must make it report a wrong state, and swapping a rule's message must make it report a wrong rule.
+
+The models are scripted rather than sampled from a real one, deliberately. A real model cannot be relied on to produce the same violation twice, and a case that does not reproduce cannot be asserted on. How *often* a given model violates policy is a different question, and one this does not answer — that answer would be about the model, not about the boundary.
+
 ## Architecture
 
 **Services and data.** Two domains, two databases, no shared storage.
@@ -286,6 +316,12 @@ cd frontend && npm run lint && npm run build
 
 ```bash
 docker compose exec api careroute-benchmark
+```
+
+Adversarial policy evaluation, against real PostgreSQL:
+
+```bash
+cd backend && careroute-agent-eval
 ```
 
 Booking concurrency, against real PostgreSQL:

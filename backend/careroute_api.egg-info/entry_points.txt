@@ -1,4 +1,5 @@
 [console_scripts]
+careroute-agent-eval = app.agent_eval:main
 careroute-benchmark = app.evaluation:main
 careroute-booking-stress = app.booking_stress:main
 careroute-compare-runtimes = app.runtime_comparison:main
