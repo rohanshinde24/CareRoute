@@ -39,6 +39,7 @@ jobs:
     env:
       DATABASE_URL: postgresql+psycopg://careroute:careroute@localhost:5432/careroute
       PROVIDER_DATABASE_URL: postgresql+psycopg://careroute:careroute@localhost:5433/careroute_provider
+      CAREROUTE_TEST_DATABASE_URL: postgresql+psycopg://careroute:careroute@localhost:5432/careroute
       CAREROUTE_TEST_PROVIDER_DATABASE_URL: postgresql+psycopg://careroute:careroute@localhost:5433/careroute_provider
       # Turns "database unreachable" from a skip into a failure, so the suite
       # cannot pass by quietly not running.
