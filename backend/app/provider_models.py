@@ -12,7 +12,7 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .events import OutboxMixin
@@ -70,8 +70,20 @@ class AppointmentSlot(ProviderBase):
     schedule: Mapped[ProviderSchedule] = relationship(back_populates="slots")
 
 
+# One active appointment per slot, enforced by the database. The booking path
+# already serialises contenders with a row lock on the slot; this is the
+# backstop for any path that does not - a future code path, a manual fix, a
+# migration. Partial rather than a plain UNIQUE(slot_id) because a cancelled
+# appointment must not keep its slot occupied forever.
+ACTIVE_APPOINTMENT_PER_SLOT = "uq_active_appointment_per_slot"
+_ACTIVE = text("status IN ('PENDING', 'BOOKED')")
+
+
 class Appointment(ProviderBase):
     __tablename__ = "appointments"
+    __table_args__ = (
+        Index(ACTIVE_APPOINTMENT_PER_SLOT, "slot_id", unique=True, postgresql_where=_ACTIVE, sqlite_where=_ACTIVE),
+    )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     # Cross-boundary reference. Validated as a UUID by the API contract; no
     # foreign key exists because the referral lives in another database.

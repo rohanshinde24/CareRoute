@@ -87,6 +87,31 @@ def _attempt(factory, slot_ids: list[uuid.UUID], replay_rate: float) -> str:
             return f"error:{type(exc).__name__}"
 
 
+BACKSTOP_DETAIL = "Selected slot was taken by a concurrent booking"
+
+
+def _without_lock():
+    """Swap the slot loader for one that reads without FOR UPDATE.
+
+    An experiment, never a mode the service runs in. With the lock gone the
+    only guard left is the partial unique index on active appointments, so this
+    shows what the schema guarantees on its own. Before that index existed, the
+    same run put 1,568 extra appointments on 20 slots.
+    """
+    from sqlalchemy.orm import joinedload
+
+    from . import provider_queries
+
+    def unlocked(db, slot_id):
+        return db.scalar(
+            select(AppointmentSlot)
+            .where(AppointmentSlot.id == slot_id)
+            .options(joinedload(AppointmentSlot.schedule).joinedload(ProviderSchedule.provider))
+        )
+
+    provider_queries._lock_slot = unlocked
+
+
 def run_contention(rounds: int, racers: int) -> dict:
     """Maximum contention: every racer hits ONE slot at the same instant.
 
@@ -126,7 +151,12 @@ def run_contention(rounds: int, racers: int) -> dict:
                 )
                 with factory() as db:
                     try:
-                        return book_slot(db, request).outcome
+                        result = book_slot(db, request)
+                        # Same outcome to the caller either way; split here so
+                        # the report shows which mechanism stopped each loser.
+                        if result.outcome == "slot_unavailable" and result.detail == BACKSTOP_DETAIL:
+                            return "slot_unavailable (index)"
+                        return result.outcome
                     except Exception as exc:
                         db.rollback()
                         return f"error:{type(exc).__name__}"
@@ -216,7 +246,14 @@ def main() -> None:
     parser.add_argument("--contention", action="store_true", help="maximum contention: every racer hits one slot simultaneously")
     parser.add_argument("--rounds", type=int, default=500)
     parser.add_argument("--racers", type=int, default=80)
+    parser.add_argument("--without-lock", action="store_true", help="contention experiment with the row lock removed, leaving only the unique index")
     args = parser.parse_args()
+
+    if args.without_lock and not args.contention:
+        raise SystemExit("  --without-lock only applies to --contention")
+    if args.without_lock:
+        _without_lock()
+        print("  ROW LOCK REMOVED for this run: the unique index is the only guard")
 
     if args.contention:
         report = run_contention(args.rounds, args.racers)
@@ -225,9 +262,14 @@ def main() -> None:
         print(f"  outcomes        {report['outcomes']}")
         print(f"  appointments    {report['slots_booked']} across {report['rounds']} contested slots")
         print(f"  DUPLICATES      {report['duplicate_bookings']}")
+        errors = {k: v for k, v in report["outcomes"].items() if k.startswith("error:")}
         if report["over_booked_slots"]:
             raise SystemExit(f"  GUARANTEE VIOLATED: {report['over_booked_slots']}")
-        print("  guarantee held under maximum contention")
+        # An error is a caller who was failed rather than answered. The invariant
+        # can hold while callers get 500s, and that is still a defect.
+        if errors:
+            raise SystemExit(f"  invariant held, but {sum(errors.values())} callers were failed instead of refused: {errors}")
+        print("  guarantee held under maximum contention, every loser refused cleanly")
         return
 
     report = run(args.attempts, args.workers, args.slots, args.replay_rate)

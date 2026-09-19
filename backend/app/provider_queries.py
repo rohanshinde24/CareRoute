@@ -33,6 +33,7 @@ from .provider_contracts import (
     SlotToolResult,
 )
 from .provider_models import (
+    ACTIVE_APPOINTMENT_PER_SLOT,
     Appointment,
     AppointmentSlot,
     AppointmentStatus,
@@ -213,6 +214,22 @@ def _remember(db: Session, request: BookingRequest, outcome: str, appointment_id
     return BookingResult(outcome=outcome, appointment_id=appointment_id, slot_id=request.slot_id, detail=detail)
 
 
+def _lock_slot(db: Session, slot_id: uuid.UUID) -> AppointmentSlot | None:
+    """Load the slot and hold its row lock until the transaction ends.
+
+    This is the primary concurrency control: contenders queue on the row, and
+    each one after the first sees the slot already BUSY and gets a clean
+    refusal. It is a named function so the stress harness can replace it to
+    show what the database backstop does on its own; production never does.
+    """
+    return db.scalar(
+        select(AppointmentSlot)
+        .where(AppointmentSlot.id == slot_id)
+        .with_for_update(of=AppointmentSlot)
+        .options(joinedload(AppointmentSlot.schedule).joinedload(ProviderSchedule.provider))
+    )
+
+
 def book_slot(db: Session, request: BookingRequest) -> BookingResult:
     """Book one slot, exactly once, inside one transaction.
 
@@ -220,47 +237,88 @@ def book_slot(db: Session, request: BookingRequest) -> BookingResult:
     response repeats the request with the same key and must learn the original
     outcome; without storing refusals, a retry after a lost conflict would look
     like a fresh attempt on a slot that is now busy for a different reason.
+
+    Three mechanisms, three jobs. The idempotency key makes a repeated request
+    return its first answer. The row lock serialises different requests for one
+    slot so the loser is refused cleanly. The partial unique index on active
+    appointments holds the invariant even when something bypasses the lock.
     """
     existing = db.scalar(select(BookingAttempt).where(BookingAttempt.idempotency_key == request.idempotency_key))
     if existing is not None:
         record_booking_attempt("replayed")
         return _replay(existing)
 
-    slot = db.scalar(
-        select(AppointmentSlot)
-        .where(AppointmentSlot.id == request.slot_id)
-        .with_for_update(of=AppointmentSlot)
-        .options(joinedload(AppointmentSlot.schedule).joinedload(ProviderSchedule.provider))
-    )
-    if slot is None:
-        result = _remember(db, request, "slot_not_found", None, "Slot does not exist")
-    elif slot.status != SlotStatus.FREE:
-        result = _remember(db, request, "slot_unavailable", None, "Selected slot is no longer available")
-    elif slot.schedule.provider.specialty.casefold() != request.requested_specialty.casefold():
-        result = _remember(db, request, "specialty_mismatch", None, "Selected slot does not match the requested specialty")
-    else:
-        appointment = Appointment(
-            referral_id=request.referral_id,
-            slot_id=slot.id,
-            idempotency_key=request.idempotency_key,
-            status=AppointmentStatus.BOOKED,
-        )
-        slot.status = SlotStatus.BUSY
-        db.add(appointment)
-        db.flush()
-        result = _remember(db, request, "booked", appointment.id, None)
+    try:
+        slot = _lock_slot(db, request.slot_id)
+        if slot is None:
+            result = _remember(db, request, "slot_not_found", None, "Slot does not exist")
+        elif slot.status != SlotStatus.FREE:
+            result = _remember(db, request, "slot_unavailable", None, "Selected slot is no longer available")
+        elif slot.schedule.provider.specialty.casefold() != request.requested_specialty.casefold():
+            result = _remember(db, request, "specialty_mismatch", None, "Selected slot does not match the requested specialty")
+        else:
+            appointment = Appointment(
+                referral_id=request.referral_id,
+                slot_id=slot.id,
+                idempotency_key=request.idempotency_key,
+                status=AppointmentStatus.BOOKED,
+            )
+            slot.status = SlotStatus.BUSY
+            db.add(appointment)
+            # Inside the try on purpose: a unique violation surfaces here, at
+            # the INSERT, not at commit. PostgreSQL makes a second inserter
+            # wait on the first's index entry and raises once that commits.
+            db.flush()
+            result = _remember(db, request, "booked", appointment.id, None)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        return _resolve_conflict(db, request, exc)
 
+    record_booking_attempt(result.outcome)
+    return result
+
+
+def _resolve_conflict(db: Session, request: BookingRequest, exc: IntegrityError) -> BookingResult:
+    """Turn a constraint violation into the answer the caller should get.
+
+    Before the slot index existed, the only possible violation was a racing
+    request with the same idempotency key, and this handler assumed so. With the
+    index, a violation can also mean a different request took the slot. Treating
+    that as an idempotency race would look up a winner under this caller's own
+    key, find none, and surface a 500 - the backstop would hold the invariant
+    and fail the caller while doing it.
+    """
+    winner = db.scalar(select(BookingAttempt).where(BookingAttempt.idempotency_key == request.idempotency_key))
+    if winner is not None:
+        # The same logical request was already decided; that answer wins.
+        record_booking_attempt("replayed")
+        return _replay(winner)
+    if not _violates(exc, ACTIVE_APPOINTMENT_PER_SLOT):
+        raise exc
+
+    # Reaching here means the slot was taken by a writer that did not queue on
+    # the lock. The caller gets the same refusal as the locked path, recorded so
+    # a retry replays it. The metric is separate so the event is visible: with
+    # every production path taking the lock, it should stay at zero.
+    result = _remember(db, request, "slot_unavailable", None, "Selected slot was taken by a concurrent booking")
     try:
         db.commit()
     except IntegrityError:
-        # Another transaction won the same idempotency key between the lookup and
-        # the commit. Its record is authoritative; report what it decided.
         db.rollback()
         winner = db.scalar(select(BookingAttempt).where(BookingAttempt.idempotency_key == request.idempotency_key))
         if winner is None:
             raise
         record_booking_attempt("replayed")
         return _replay(winner)
-
-    record_booking_attempt(result.outcome)
+    record_booking_attempt("slot_conflict_backstop")
     return result
+
+
+def _violates(exc: IntegrityError, constraint: str) -> bool:
+    """Which constraint failed, by name where the driver reports it."""
+    name = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+    if name is not None:
+        return name == constraint
+    # SQLite reports the columns rather than the index name.
+    return "appointments.slot_id" in str(exc.orig)

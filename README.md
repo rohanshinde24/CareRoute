@@ -234,7 +234,7 @@ sequenceDiagram
 
 - **Durable workflows** via Inngest: retryable and memoized steps, waits, timeouts, and cancellation.
 - **Idempotent commands**: document arrival, slot selection, confirmation, and cancellation are deduplicated, so a retried or duplicated request cannot double-apply.
-- **Effectively-once booking**: confirmation-gated and row-locked inside the provider database, so concurrent confirmations cannot produce two appointments for one slot.
+- **Effectively-once booking**: confirmation-gated, row-locked, and backed by a partial unique index inside the provider database, so concurrent confirmations cannot produce two appointments for one slot — even through a code path that forgets the lock.
 - **Recovery**: lost responses and stale slot selections are handled explicitly rather than assumed away.
 
 *Effectively-once*, not exactly-once, is the deliberate word. Exactly-once delivery is not achievable over an unreliable network — the transport can always retry and a request can always arrive twice. What is achievable is exactly-once **effects**: the request may arrive any number of times and the side effect happens once.
@@ -247,11 +247,26 @@ sequenceDiagram
 |---|---|---|---|
 | Volume | 1M attempts, 80 workers, 10,000 slots | ~100 racing per slot, spread over 22 min | **0** |
 | Contention | 500 rounds × 80 racers at a single slot | barrier-released, simultaneous | **0** |
-| Contention, **lock removed** | 20 rounds × 80 racers | barrier-released, simultaneous | **1,568** |
+| Contention, **lock removed**, index present | 100 rounds × 80 racers | barrier-released, simultaneous | **0** |
+| Contention, lock **and** index absent *(before the index existed)* | 20 rounds × 80 racers | barrier-released, simultaneous | **1,568** |
 
-Two design choices make the contention mode the sharp test. A `threading.Barrier` releases every racer at the same instant, so attempts genuinely overlap instead of arriving in a stream. And **every racer carries a distinct idempotency key** — with shared keys the unique index alone would prevent duplicates and a broken lock would go unnoticed, so distinct keys leave the row lock as the only guard.
+Two design choices make the contention mode the sharp test. A `threading.Barrier` releases every racer at the same instant, so attempts genuinely overlap instead of arriving in a stream. And **every racer carries a distinct idempotency key** — with shared keys the idempotency-key index alone would prevent duplicates and a broken lock would go unnoticed, so distinct keys leave slot protection as the only guard.
 
 That distinction is not hypothetical. Neither the six-racer unit test nor a million spread attempts detected a deliberately removed lock; 80 simultaneous racers produced 1,568 duplicate bookings across 20 slots. **Contention per instant matters more than total volume**, and a mutation that survives a weak test has not been shown to be safe.
+
+### Three mechanisms, three jobs
+
+That result exposed that the one-appointment-per-slot invariant depended on every caller remembering to take a lock. It is now also a property of the schema: a partial unique index on active appointments per slot. Partial rather than `UNIQUE(slot_id)`, so a cancelled appointment releases its slot.
+
+| Mechanism | Job | What happens without it |
+|---|---|---|
+| Idempotency key | A repeated request returns its first answer | Retries book again |
+| Row lock on the slot | Serialises *different* requests; losers get a clean refusal | The index still holds, but losers are stopped by a constraint violation |
+| Partial unique index | Holds the invariant for any writer, locked or not | 1,568 duplicates in 1,600 attempts |
+
+With both in place, all 39,500 losers across 500 × 80 were refused by the lock and **none** reached the index — it is a backstop, not a code path. With the lock removed, 7,437 of 7,900 losers were stopped by the index and the rest arrived after the winner committed. Zero duplicates, and zero callers failed.
+
+That last part needed its own fix. The conflict handler used to assume every constraint violation was an idempotency race, so with the index added and the lock bypassed, every loser would have received a 500 while the invariant held. It now checks which constraint fired and turns a slot conflict into the same recorded, replayable refusal the locked path produces.
 
 ### Where this stops scaling
 

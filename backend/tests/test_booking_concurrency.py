@@ -17,12 +17,15 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, select, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import joinedload, sessionmaker
 
 from app.provider_contracts import BookingRequest
 from app.provider_models import (
+    ACTIVE_APPOINTMENT_PER_SLOT,
     Appointment,
     AppointmentSlot,
+    AppointmentStatus,
     BookingAttempt,
     Provider,
     ProviderSchedule,
@@ -40,7 +43,7 @@ CONTENDERS = 6
 @pytest.fixture
 def factory():
     try:
-        engine = create_engine(PROVIDER_DATABASE_URL, pool_size=CONTENDERS + 4, max_overflow=4)
+        engine = create_engine(PROVIDER_DATABASE_URL, pool_size=BACKSTOP_RACERS + 4, max_overflow=4)
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
     except Exception as exc:  # pragma: no cover - environment dependent
@@ -51,7 +54,11 @@ def factory():
         if os.environ.get("CAREROUTE_REQUIRE_POSTGRES"):
             pytest.fail(message)
         pytest.skip(message)
-    return sessionmaker(bind=engine, expire_on_commit=False)
+    yield sessionmaker(bind=engine, expire_on_commit=False)
+    # Without this every test leaves its pooled connections open, and a run
+    # long enough exhausts max_connections with errors that look like booking
+    # failures. Found by repeating this module under pytest-repeat.
+    engine.dispose()
 
 
 @pytest.fixture
@@ -198,6 +205,107 @@ def test_every_booking_decision_is_recorded_for_replay(factory, slot):
 
     assert outcomes == {"booked", "slot_unavailable"}
     assert booked.outcome == "booked" and refused.outcome == "slot_unavailable"
+
+
+def _rogue_appointment(factory, slot_id, status=AppointmentStatus.BOOKED):
+    """An appointment written without book_slot and without the lock.
+
+    Stands in for any path that bypasses the booking transaction - a future
+    endpoint, a manual fix, a backfill. The slot is deliberately left FREE, so
+    the application check alone would let a second booking through.
+    """
+    with factory() as session:
+        session.add(Appointment(referral_id=uuid.uuid4(), slot_id=slot_id, idempotency_key=f"rogue:{uuid.uuid4()}", status=status))
+        session.commit()
+
+
+def test_the_database_rejects_a_second_active_appointment_for_a_slot(factory, slot):
+    _rogue_appointment(factory, slot["slot"])
+
+    with pytest.raises(IntegrityError) as caught:
+        _rogue_appointment(factory, slot["slot"])
+    assert caught.value.orig.diag.constraint_name == ACTIVE_APPOINTMENT_PER_SLOT
+
+
+def test_a_cancelled_appointment_releases_its_slot(factory, slot):
+    """Partial, not UNIQUE(slot_id): a plain unique index would hold the slot forever."""
+    _rogue_appointment(factory, slot["slot"], status=AppointmentStatus.CANCELLED)
+    _rogue_appointment(factory, slot["slot"], status=AppointmentStatus.BOOKED)
+
+    with factory() as session:
+        assert len(session.scalars(select(Appointment).where(Appointment.slot_id == slot["slot"])).all()) == 2
+
+
+def test_a_booking_that_loses_to_an_unlocked_writer_is_refused_cleanly(factory, slot):
+    """The backstop must refuse the caller, not fail them.
+
+    Before the handler learned to tell constraints apart, this path looked up a
+    winner under the caller's own idempotency key, found none, and re-raised:
+    invariant held, caller got a 500.
+    """
+    _rogue_appointment(factory, slot["slot"])
+    request = _request(slot["slot"])
+
+    result = _attempt(factory, request)
+
+    assert not isinstance(result, Exception), f"backstop surfaced an error: {result!r}"
+    assert result.outcome == "slot_unavailable"
+    assert result.detail == "Selected slot was taken by a concurrent booking"
+    # Recorded, so a retry replays the refusal instead of trying again.
+    retry = _attempt(factory, request)
+    assert retry.replayed is True and retry.outcome == "slot_unavailable"
+    with factory() as session:
+        assert len(session.scalars(select(Appointment).where(Appointment.slot_id == slot["slot"])).all()) == 1
+
+
+BACKSTOP_RACERS = 12
+
+
+def test_without_the_lock_the_index_alone_prevents_double_booking(factory, slot, monkeypatch):
+    """Remove the row lock and force the race. The database must hold the line.
+
+    With neither the lock nor the index, 80 racers once put 80 appointments on
+    nearly every slot. Here only the lock is gone.
+
+    The race is forced rather than hoped for. The replacement loader reads the
+    slot without locking and then waits until every racer has read it too, so
+    all of them see FREE before any of them inserts. An earlier version just
+    released racers from a barrier and let them run; about one run in five they
+    serialised on their own and the index was never exercised, which is a
+    test that passes without testing anything.
+    """
+    from app import provider_queries
+
+    everyone_has_read = threading.Barrier(BACKSTOP_RACERS, timeout=20)
+
+    def unlocked(db, slot_id):
+        slot = db.scalar(
+            select(AppointmentSlot)
+            .where(AppointmentSlot.id == slot_id)
+            .options(joinedload(AppointmentSlot.schedule).joinedload(ProviderSchedule.provider))
+        )
+        everyone_has_read.wait()
+        return slot
+
+    monkeypatch.setattr(provider_queries, "_lock_slot", unlocked)
+    requests = [_request(slot["slot"]) for _ in range(BACKSTOP_RACERS)]
+
+    with ThreadPoolExecutor(max_workers=BACKSTOP_RACERS) as pool:
+        results = list(pool.map(lambda request: _attempt(factory, request), requests))
+
+    failures = [r for r in results if isinstance(r, Exception)]
+    assert not failures, f"losers must be refused, not failed: {failures}"
+    booked = [r for r in results if r.outcome == "booked"]
+    refused = [r for r in results if r.outcome == "slot_unavailable"]
+    assert len(booked) == 1
+    assert len(refused) == BACKSTOP_RACERS - 1
+    # Every racer saw FREE, so every loser was stopped by the index and nothing else.
+    assert all(r.detail == "Selected slot was taken by a concurrent booking" for r in refused)
+    with factory() as session:
+        assert len(session.scalars(select(Appointment).where(Appointment.slot_id == slot["slot"])).all()) == 1
+        # A refusal is recorded like any other decision, so each loser's retry replays it.
+        attempts = session.scalars(select(BookingAttempt).where(BookingAttempt.slot_id == slot["slot"])).all()
+        assert len(attempts) == BACKSTOP_RACERS
 
 
 def test_the_stress_harness_refuses_to_exceed_the_connection_ceiling():
