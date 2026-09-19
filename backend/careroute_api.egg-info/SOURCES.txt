@@ -21,6 +21,7 @@ app/mcp_server.py
 app/metrics.py
 app/model_providers.py
 app/models.py
+app/outage_drill.py
 app/pagination.py
 app/provider_contracts.py
 app/provider_database.py
@@ -61,7 +62,9 @@ tests/test_outbox.py
 tests/test_p2_workflow.py
 tests/test_pagination.py
 tests/test_provider_boundary.py
+tests/test_provider_service_pool.py
 tests/test_readme_diagram.py
 tests/test_reconciler_event_loss.py
+tests/test_relay_crash.py
 tests/test_telemetry.py
 tests/test_tools.py

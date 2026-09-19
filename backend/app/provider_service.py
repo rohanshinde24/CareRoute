@@ -1,6 +1,9 @@
+import functools
+import inspect
 import uuid
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi.routing import APIRoute
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,7 +18,45 @@ from .telemetry import configure_telemetry
 from .metrics import configure_metrics
 
 
+class ReleasesSessionRoute(APIRoute):
+    """Return a sync endpoint's database connection before the endpoint returns.
+
+    FastAPI closes a `yield` dependency only after the response is serialized,
+    and for a sync endpoint that serialization is a second hop onto the same
+    40-thread pool the endpoints run on. Under a burst larger than the
+    connection pool this deadlocks until pool timeouts break it: threads fill
+    up waiting for a connection, while the requests holding the connections have
+    already finished their queries and are queued for a thread to serialize on.
+    After a 60-second freeze, 400 abandoned requests on the queue kept this
+    service unavailable for 26 seconds on that alone.
+
+    Closing the session in the endpoint's own thread means a request never holds
+    a connection while waiting for a thread. Endpoints here return Pydantic
+    contract objects rather than ORM rows, so nothing needs the session after.
+    Applied as the route class so a new endpoint cannot forget it.
+    """
+
+    def __init__(self, path, endpoint, **kwargs):
+        if not inspect.iscoroutinefunction(endpoint):
+            endpoint = _releasing_sessions(endpoint)
+        super().__init__(path, endpoint, **kwargs)
+
+
+def _releasing_sessions(endpoint):
+    @functools.wraps(endpoint)
+    def call(*args, **kwargs):
+        try:
+            return endpoint(*args, **kwargs)
+        finally:
+            for value in kwargs.values():
+                if isinstance(value, Session):
+                    value.close()
+
+    return call
+
+
 app = FastAPI(title="CareRoute Provider Service", version="0.1.0")
+app.router.route_class = ReleasesSessionRoute
 
 
 def _correlate(response: Response, correlation_id: str | None) -> str:

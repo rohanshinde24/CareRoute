@@ -102,6 +102,23 @@ The referral API reaches the provider service only through a typed asynchronous 
 
 A **circuit breaker** sits around the whole call. Retries stop one caller hammering a struggling dependency; they do not stop every caller doing it at once, and while a dependency is down each request still pays its full retry budget before failing. After five consecutive transient failures the breaker opens and fails immediately, then lets a single request through after thirty seconds to test recovery. Measured against a stopped provider service, calls dropped from ~0.2 s to ~0.004 s once open, and the circuit closed on its own once the service returned.
 
+### A hung dependency, measured
+
+A stopped service is the easy case, because connections are refused at once. `careroute-outage-drill` instead **freezes** the provider service with `docker compose pause`. The kernel keeps accepting connections, so every attempt waits out its full 3-second timeout, three times over. The drill runs 20 clients against a provider-dependent endpoint and 5 against an unrelated one for 15 s healthy, 60 s frozen and 45 s after the thaw, recording every request.
+
+| | Breaker off | Breaker on |
+|---|---|---|
+| Frozen-phase provider calls that paid the ~9.2 s timeout | 120 of 120 | **5 of 17,155** |
+| Frozen-phase provider p50 | 9,187 ms | **37 ms** |
+| Unrelated traffic during the freeze | 100% OK | 100% OK |
+| Thaw to first successful provider call | **1.2 s** | 27.0 s |
+
+The breaker turns a 9-second hang into a fast failure for everyone except the first wave. It pays for that at recovery: the circuit stays open until its next 30-second probe, even after the dependency is healthy again. A shorter reset window would recover faster, at the cost of one caller eating the full timeout at every probe while the outage lasts.
+
+Unrelated traffic was never affected. The provider call is async, so waiting on a hung dependency occupies no worker thread.
+
+**The drill also found a deadlock.** The first runs showed the provider service unavailable for about 30 seconds *after* the thaw, with the breaker on or off. During the freeze, 400 abandoned requests piled up in its accept queue. On thaw, all of them landed at once. FastAPI serializes a sync endpoint's response on the same 40-thread pool its endpoints run on, and closes a `yield` session dependency only after that. So requests that had finished their queries kept holding all 15 pooled connections, `idle in transaction`, while waiting for a thread. Every thread was blocked waiting for one of those connections. Only 5-second pool timeouts broke the cycle, 167 times over. The fix closes the session inside the endpoint's own thread, applied through a route class so no endpoint can miss it. After it, the service recovers from the same backlog in about a second with no pool timeouts, and a test reproduces the deadlock in miniature: one connection, three threads, eight requests.
+
 Only transient failures move it. A 4xx or a malformed payload means *this* system sent something wrong, so tripping on those would turn a local bug into an apparent outage and take the dependency out of service for every other caller.
 
 **Booking executes inside the provider service**, where the slot and the appointment live, so the lock, the slot state change, and the appointment write remain a single transaction. It is requested with a caller-supplied idempotency key, and the provider side records its decision — refusals as well as successes — so a caller that loses the response can repeat the request and learn the original outcome rather than act twice.
