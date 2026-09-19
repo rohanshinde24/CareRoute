@@ -2,17 +2,6 @@
 
 A referral-coordination system that demonstrates how to put a language model inside an administrative workflow **without letting it become the authority**. Deterministic code owns every decision that has a consequence; the model is confined to interpreting ambiguity and making proposals that must survive validation before anything happens.
 
-## Scope and safety notice
-
-**This project runs entirely on synthetic data and is not a medical device.**
-
-- It does **not** diagnose, prescribe, triage by acuity, or recommend treatment.
-- It makes **no claim of HIPAA compliance** and must not be used with real patient data.
-- All patients, providers, coverage records, documents, and schedules are generated fixtures.
-- Its decisions are administrative only: which specialty a referral was submitted under, whether required paperwork is present, which providers are eligible, and which appointment slots are free.
-
-It is a portfolio and research system for distributed-systems and agent-safety design, not a clinical product.
-
 ## The safety boundary
 
 This is the central idea of the project, and everything else is built to enforce it.
@@ -388,7 +377,7 @@ Nine administrative tools are exposed over the official Python MCP SDK via stdio
 
 `getReferral`, `getPatient`, `getCoverage`, `getReferralDocuments`, `getReferralHistory`, `getRecentProcedures`, `requestMissingDocument`, `findProviders`, `getAvailableSlots`.
 
-Eight are annotated read-only; only `requestMissingDocument` writes, and it performs an administrative request rather than a clinical action.
+Eight are annotated read-only; only `requestMissingDocument` writes.
 
 ```bash
 cd backend && python -m app.mcp_server
@@ -416,5 +405,3 @@ Stated plainly, because a system like this is only as trustworthy as its honesty
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-The license disclaims warranty and liability. That disclaimer is load-bearing here: this is a synthetic-data demonstration system, not clinical software, and it must not be used with real patient data or in any care-delivery setting.
