@@ -119,6 +119,17 @@ Only transient failures move it. A 4xx or a malformed payload means *this* syste
 
 **Domain events go through a transactional outbox.** Each database has its own outbox table, written in the *same transaction* as the state change it describes — a commit followed by a separate publish is not atomic, and would either announce something that rolled back or silently lose something that happened. A relay claims rows with `SELECT ... FOR UPDATE SKIP LOCKED`, publishes to Redis Streams, then marks them dispatched. It publishes *before* marking on purpose: a crash between the two produces a duplicate, which consumers absorb, rather than a silence, which nothing downstream can repair.
 
+This is tested with a real process kill, not asserted. `tests/test_relay_crash.py` runs the relay as a separate process and `SIGKILL`s it at both points where the ordering matters, then starts a clean relay and lets the real consumer read the result:
+
+| Killed | Published | Consumer outcomes | Effect applied |
+|---|---|---|---|
+| before the event reached Redis | once, by the restart | `reconciled` | once |
+| after Redis acknowledged it, before the row was marked | twice | `reconciled`, `duplicate` | once |
+
+`SIGKILL` rather than an exception matters: an exception unwinds and rolls back politely, while a killed process leaves PostgreSQL to discover the dropped connection and release the row lock on its own.
+
+Reversing the order to mark-then-publish fails the first case. The row is marked dispatched for an event that was never sent, and it is lost for good. The consumer absorbs duplicates in three layers: a lookup of already-consumed events, a unique constraint on the event ID that catches a race past the lookup, and a handler that will not re-confirm a confirmed referral. Only removing the first two makes the test fail, and even then the third layer kept the side effect single.
+
 The relay runs outside the request path, so a broker outage delays delivery instead of failing a user-facing operation. Redis uses AOF with `appendfsync everysec`; the resulting one-second window of acknowledged-but-unwritten events is survivable because the outbox holds the authoritative record.
 
 The referral API owns referral coordination, the workflow state machine, confirmation gating, model adapters, patient and coverage tools, MCP, and FHIR translation.
