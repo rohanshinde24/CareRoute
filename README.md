@@ -117,7 +117,7 @@ The breaker turns a 9-second hang into a fast failure for everyone except the fi
 
 Unrelated traffic was never affected. The provider call is async, so waiting on a hung dependency occupies no worker thread.
 
-**The drill also found a deadlock.** The first runs showed the provider service unavailable for about 30 seconds *after* the thaw, with the breaker on or off. During the freeze, 400 abandoned requests piled up in its accept queue. On thaw, all of them landed at once. FastAPI serializes a sync endpoint's response on the same 40-thread pool its endpoints run on, and closes a `yield` session dependency only after that. So requests that had finished their queries kept holding all 15 pooled connections, `idle in transaction`, while waiting for a thread. Every thread was blocked waiting for one of those connections. Only 5-second pool timeouts broke the cycle, 167 times over. The fix closes the session inside the endpoint's own thread, applied through a route class so no endpoint can miss it. After it, the service recovers from the same backlog in about a second with no pool timeouts, and a test reproduces the deadlock in miniature: one connection, three threads, eight requests.
+**Recovery is bounded by design, not by luck.** An outage leaves a backlog: 400 requests abandoned by their callers arrive at once the moment the dependency thaws. A sync endpoint here releases its database connection inside its own thread, before the response is serialized, so a burst larger than the connection pool queues rather than deadlocking — no request holds a connection while waiting for a thread. That is enforced by the provider service's route class rather than by convention, and `tests/test_provider_service_pool.py` holds it to one connection, three threads and eight concurrent requests. The service clears the full backlog in about a second with no pool timeouts.
 
 Only transient failures move it. A 4xx or a malformed payload means *this* system sent something wrong, so tripping on those would turn a local bug into an apparent outage and take the dependency out of service for every other caller.
 
@@ -273,7 +273,7 @@ That distinction is not hypothetical. Neither the six-racer unit test nor a mill
 
 ### Three mechanisms, three jobs
 
-That result exposed that the one-appointment-per-slot invariant depended on every caller remembering to take a lock. It is now also a property of the schema: a partial unique index on active appointments per slot. Partial rather than `UNIQUE(slot_id)`, so a cancelled appointment releases its slot.
+One active appointment per slot is a property of the schema, not only of the booking path: a partial unique index on active appointments per slot. Partial rather than `UNIQUE(slot_id)`, so a cancelled appointment releases its slot. The invariant therefore survives any writer, including one that never takes the lock.
 
 | Mechanism | Job | What happens without it |
 |---|---|---|
@@ -283,7 +283,7 @@ That result exposed that the one-appointment-per-slot invariant depended on ever
 
 With both in place, all 39,500 losers across 500 × 80 were refused by the lock and **none** reached the index — it is a backstop, not a code path. With the lock removed, 7,437 of 7,900 losers were stopped by the index and the rest arrived after the winner committed. Zero duplicates, and zero callers failed.
 
-That last part needed its own fix. The conflict handler used to assume every constraint violation was an idempotency race, so with the index added and the lock bypassed, every loser would have received a 500 while the invariant held. It now checks which constraint fired and turns a slot conflict into the same recorded, replayable refusal the locked path produces.
+Holding the invariant is not enough on its own — the caller has to get a usable answer. The conflict handler distinguishes which constraint failed, so a slot conflict becomes the same recorded, replayable `slot_unavailable` refusal the locked path returns, rather than an error. An invariant can hold while every loser receives a 500, and that is still a defect.
 
 ### Where this stops scaling
 
