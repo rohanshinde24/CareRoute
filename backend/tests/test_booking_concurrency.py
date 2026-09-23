@@ -178,6 +178,54 @@ def test_a_refusal_is_replayable_so_a_retry_does_not_look_like_a_fresh_attempt(f
     assert replayed.detail == refused.detail
 
 
+def test_a_key_reused_for_a_different_request_is_refused_rather_than_replayed(factory, slot):
+    """An idempotency key stands for one request, not for one caller.
+
+    Replaying here would report a booking for a slot this request never named,
+    which is worse than refusing: the caller would believe it holds an
+    appointment it did not ask for.
+    """
+    key = f"reuse:{uuid.uuid4()}"
+    # A real retry repeats the whole request, referral included, so the request
+    # object is reused rather than rebuilt.
+    first = _request(slot["slot"], key=key)
+    original = _attempt(factory, first)
+    assert original.outcome == "booked"
+
+    for different in (
+        _request(uuid.uuid4(), referral_id=first.referral_id, key=key),  # another slot
+        _request(slot["slot"], key=key),  # another referral
+    ):
+        reused = _attempt(factory, different)
+        assert reused.outcome == "idempotency_key_conflict", f"expected a refusal, got {reused}"
+        assert reused.appointment_id is None
+        assert not reused.replayed
+
+    # The original decision is untouched, and a true retry still replays it.
+    retry = _attempt(factory, first)
+    assert retry.replayed is True
+    assert retry.appointment_id == original.appointment_id
+
+
+def test_a_decision_recorded_before_fingerprints_existed_still_replays(factory, slot):
+    """Rows written by an older version carry no fingerprint.
+
+    Refusing them would turn a deployment into an outage for every in-flight
+    retry, so a missing fingerprint replays exactly as it used to.
+    """
+    key = f"legacy:{uuid.uuid4()}"
+    original = _attempt(factory, _request(slot["slot"], key=key))
+    assert original.outcome == "booked"
+    with factory() as session:
+        session.execute(text("UPDATE booking_attempts SET request_fingerprint = NULL WHERE idempotency_key = :k"), {"k": key})
+        session.commit()
+
+    replay = _attempt(factory, _request(uuid.uuid4(), key=key))
+
+    assert replay.replayed is True
+    assert replay.appointment_id == original.appointment_id
+
+
 def test_specialty_is_rechecked_by_the_owning_domain(factory, slot):
     """The caller states the specialty it wants; the provider domain verifies it
     against the record only it can read."""

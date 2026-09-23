@@ -121,7 +121,7 @@ Unrelated traffic was never affected. The provider call is async, so waiting on 
 
 Only transient failures move it. A 4xx or a malformed payload means *this* system sent something wrong, so tripping on those would turn a local bug into an apparent outage and take the dependency out of service for every other caller.
 
-**Booking executes inside the provider service**, where the slot and the appointment live, so the lock, the slot state change, and the appointment write remain a single transaction. It is requested with a caller-supplied idempotency key, and the provider side records its decision — refusals as well as successes — so a caller that loses the response can repeat the request and learn the original outcome rather than act twice.
+**Booking executes inside the provider service**, where the slot and the appointment live, so the lock, the slot state change, and the appointment write remain a single transaction. It is requested with a caller-supplied idempotency key, and the provider side records its decision — refusals as well as successes — so a caller that loses the response can repeat the request and learn the original outcome rather than act twice. The key is bound to a fingerprint of the request it was used for, so a key repeated with different arguments is refused rather than answered with a decision about a slot the caller never named. The referral side derives its key from the referral and the slot, so its own keys cannot collide; the check defends the provider service's booking API against every other caller.
 
 **Domain events go through a transactional outbox.** Each database has its own outbox table, written in the *same transaction* as the state change it describes — a commit followed by a separate publish is not atomic, and would either announce something that rolled back or silently lose something that happened. A relay claims rows with `SELECT ... FOR UPDATE SKIP LOCKED`, publishes to Redis Streams, then marks them dispatched. It publishes *before* marking on purpose: a crash between the two produces a duplicate, which consumers absorb, rather than a silence, which nothing downstream can repair.
 
@@ -277,7 +277,7 @@ One active appointment per slot is a property of the schema, not only of the boo
 
 | Mechanism | Job | What happens without it |
 |---|---|---|
-| Idempotency key | A repeated request returns its first answer | Retries book again |
+| Idempotency key, bound to a request fingerprint | A repeated request returns its first answer, and a key reused for a different request is refused | Retries book again, or a caller is told about a booking it never requested |
 | Row lock on the slot | Serialises *different* requests; losers get a clean refusal | The index still holds, but losers are stopped by a constraint violation |
 | Partial unique index | Holds the invariant for any writer, locked or not | 1,568 duplicates in 1,600 attempts |
 

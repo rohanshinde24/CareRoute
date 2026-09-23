@@ -20,12 +20,16 @@ from .workflow import InvalidTransition
 from .telemetry import configure_telemetry
 from .metrics import configure_metrics
 from .pagination import CursorPage, InvalidCursor, clamp_limit, decode_cursor, encode_cursor
+from .sessions import ReleasesSessionRoute
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     yield
 
 app = FastAPI(title="CareRoute API", version="0.1.0", lifespan=lifespan)
+# Set before any route is declared: a sync endpoint must release its
+# connection before the response is serialized. See app/sessions.py.
+app.router.route_class = ReleasesSessionRoute
 app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_origins, allow_credentials=False, allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
 mount_inngest(app)
 

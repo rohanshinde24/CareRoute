@@ -163,7 +163,10 @@ class ConsumedEvent(Base):
 
     __tablename__ = "consumed_events"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    event_id: Mapped[uuid.UUID] = mapped_column(unique=True, index=True)
+    # Unique, not unique + index: `unique=True, index=True` builds two identical
+    # unique indexes on one column, so every write pays for both. The constraint
+    # alone both enforces the invariant and serves lookups.
+    event_id: Mapped[uuid.UUID] = mapped_column(unique=True)
     event_type: Mapped[str] = mapped_column(String(80))
     consumer: Mapped[str] = mapped_column(String(60))
     outcome: Mapped[str] = mapped_column(String(40))

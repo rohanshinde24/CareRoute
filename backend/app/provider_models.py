@@ -105,6 +105,10 @@ class BookingAttempt(ProviderBase):
 
     __tablename__ = "booking_attempts"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # What the key was used for, so a key reused with different arguments can be
+    # told apart from a genuine retry. Nullable for rows written before this
+    # existed; those replay as they always did.
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64))
     idempotency_key: Mapped[str] = mapped_column(String(200), unique=True, index=True)
     referral_id: Mapped[uuid.UUID] = mapped_column(index=True)
     slot_id: Mapped[uuid.UUID]

@@ -8,6 +8,7 @@ enforced by PostgreSQL rather than asserted across a network.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 
 from sqlalchemy import select, tuple_
@@ -199,11 +200,23 @@ def _announce(db: Session, request: BookingRequest, outcome: str, appointment_id
     db.add(ProviderOutbox(**build_event(event_type, "careroute-provider-service", payload, current_traceparent())))
 
 
+def _fingerprint(request: BookingRequest) -> str:
+    """What this idempotency key stands for.
+
+    Everything the provider domain acts on. A caller repeating a request with
+    the same key must be repeating the same request; if the arguments differ,
+    one of the two is a mistake and returning the stored answer would hide it.
+    """
+    material = f"{request.referral_id}|{request.slot_id}|{request.requested_specialty.casefold()}"
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
 def _remember(db: Session, request: BookingRequest, outcome: str, appointment_id: uuid.UUID | None, detail: str | None) -> BookingResult:
     _announce(db, request, outcome, appointment_id)
     db.add(
         BookingAttempt(
             idempotency_key=request.idempotency_key,
+            request_fingerprint=_fingerprint(request),
             referral_id=request.referral_id,
             slot_id=request.slot_id,
             outcome=outcome,
@@ -245,6 +258,17 @@ def book_slot(db: Session, request: BookingRequest) -> BookingResult:
     """
     existing = db.scalar(select(BookingAttempt).where(BookingAttempt.idempotency_key == request.idempotency_key))
     if existing is not None:
+        # A key carries one request. Reused with different arguments it is a
+        # caller bug, and replaying the stored decision would answer a question
+        # nobody asked - reporting a booking for a slot this request never named.
+        # Rows written before fingerprints existed carry none and still replay.
+        if existing.request_fingerprint is not None and existing.request_fingerprint != _fingerprint(request):
+            record_booking_attempt("idempotency_key_conflict")
+            return BookingResult(
+                outcome="idempotency_key_conflict",
+                slot_id=request.slot_id,
+                detail="This idempotency key was already used for a different booking request",
+            )
         record_booking_attempt("replayed")
         return _replay(existing)
 
